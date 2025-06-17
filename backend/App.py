@@ -5,6 +5,8 @@ import json
 from datetime import datetime
 import calendar
 from flask_sqlalchemy import SQLAlchemy
+from dateutil.relativedelta import relativedelta
+
 from flask_migrate import Migrate
 import os
 from dotenv import load_dotenv
@@ -101,124 +103,50 @@ def add_transaction():
     if not all(field in data for field in required_fields):
         return jsonify({'error': 'Missing required fields'}), 400
 
+    # Handle optional fields
+    description = data.get('description', '')
+    start_date_str = data.get('date', datetime.now().strftime('%Y-%m-%d'))
+    start_date = datetime.strptime(start_date_str, "%Y-%m-%d")
+
+    is_recurring = data.get('is_recurring', False)
+    recurrence_months = int(data.get('recurrence_months', 1)) if is_recurring else 1
+
     conn = sqlite3.connect('money_tracker.db')
     cursor = conn.cursor()
 
-    # Insert transaction
-    cursor.execute('''
-        INSERT INTO transactions (type, category, amount, description, date)
-        VALUES (?, ?, ?, ?, ?)
-    ''', (
-        data['type'],
-        data['category'],
-        float(data['amount']),
-        data.get('description', ''),
-        data.get('date', datetime.now().strftime('%Y-%m-%d'))
-    ))
+    transaction_ids = []
+
+    for i in range(recurrence_months):
+        transaction_date = (start_date + relativedelta(months=i)).strftime("%Y-%m-%d")
+
+        cursor.execute('''
+            INSERT INTO transactions (type, category, amount, description, date)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (
+            data['type'],
+            data['category'],
+            float(data['amount']),
+            description,
+            transaction_date
+        ))
+
+        transaction_ids.append(cursor.lastrowid)
 
     conn.commit()
-    transaction_id = cursor.lastrowid
     conn.close()
 
-    return jsonify({'id': transaction_id, 'message': 'Transaction added successfully'}), 201
+    return jsonify({
+        'ids': transaction_ids,
+        'message': f'{recurrence_months} transaction(s) added successfully'
+    }), 201
 
-# @app.route('/api/transactions', methods=['POST'])
-# def add_transaction():
-#     data = request.json
-#
-#     required_fields = ['type', 'category', 'amount']
-#     if not all(field in data for field in required_fields):
-#         return jsonify({'error': 'Missing required fields'}), 400
-#
-#     new_transaction = Transaction(
-#         type=data['type'],
-#         category=data['category'],
-#         amount=float(data['amount']),
-#         description=data.get('description', ''),
-#         date=datetime.strptime(data.get('date'), '%Y-%m-%d') if data.get('date') else datetime.utcnow()
-#     )
-#
-#     db.session.add(new_transaction)
-#     db.session.commit()
-#
-#     return jsonify({'id': new_transaction.id, 'message': 'Transaction added successfully'}), 201
 
-# @app.route('/api/analytics', methods=['GET'])
-# def get_analytics():
-#     """Get analytics data"""
-#     period = request.args.get('period', 'monthly')  # 'monthly' or 'yearly'
-#     categories = request.args.get('categories', '')  # comma-separated categories
-#
-#     conn = sqlite3.connect('money_tracker.db')
-#     cursor = conn.cursor()
-#
-#     # Base query
-#     if period == 'monthly':
-#         date_format = '%Y-%m'
-#         date_group = "strftime('%Y-%m', date)"
-#     else:  # yearly
-#         date_format = '%Y'
-#         date_group = "strftime('%Y', date)"
-#
-#     # Filter by categories if specified
-#     category_filter = ""
-#     params = []
-#     if categories and categories != 'all':
-#         category_list = categories.split(',')
-#         placeholders = ','.join(['?' for _ in category_list])
-#         category_filter = f" WHERE category IN ({placeholders})"
-#         params = category_list
-#
-#     # Get summary data
-#     cursor.execute(f'''
-#         SELECT
-#             {date_group} as period,
-#             type,
-#             SUM(amount) as total
-#         FROM transactions
-#         {category_filter}
-#         GROUP BY {date_group}, type
-#         ORDER BY period DESC
-#     ''', params)
-#
-#     summary = {}
-#     for row in cursor.fetchall():
-#         period_key, transaction_type, total = row
-#         if period_key not in summary:
-#             summary[period_key] = {'income': 0, 'expense': 0}
-#         summary[period_key][transaction_type] = total
-#
-#     # Get category breakdown
-#     cursor.execute(f'''
-#         SELECT
-#             {date_group} as period,
-#             category,
-#             type,
-#             SUM(amount) as total
-#         FROM transactions
-#         {category_filter}
-#         GROUP BY {date_group}, category, type
-#         ORDER BY period DESC, total DESC
-#     ''', params)
-#
-#     category_breakdown = {}
-#     for row in cursor.fetchall():
-#         period_key, category, transaction_type, total = row
-#         if period_key not in category_breakdown:
-#             category_breakdown[period_key] = {'income': {}, 'expense': {}}
-#         category_breakdown[period_key][transaction_type][category] = total
-#
-#     conn.close()
-#
-#     return jsonify({
-#         'summary': summary,
-#         'categoryBreakdown': category_breakdown
-#     })
 
 @app.route('/api/analytics', methods=['GET'])
 def get_analytics():
     period = request.args.get('period', 'monthly')
     categories = request.args.get('categories', '')
+    category = request.args.get('category', '')  # for yearly single category filter
 
     conn = sqlite3.connect('money_tracker.db')
     cursor = conn.cursor()
@@ -228,15 +156,21 @@ def get_analytics():
     else:
         date_group = "strftime('%Y', date)"
 
+    # --- Category Filter Logic ---
     category_filter = ""
     params = []
-    if categories and categories != 'all':
+
+    if period == 'monthly' and categories and categories.lower() != 'all':
         category_list = categories.split(',')
         placeholders = ','.join(['?' for _ in category_list])
         category_filter = f" WHERE category IN ({placeholders})"
         params = category_list
 
-    # Summary data (existing)
+    elif period == 'yearly' and category and category.lower() != 'all':
+        category_filter = " WHERE category = ?"
+        params = [category]
+
+    # --- Summary ---
     cursor.execute(f'''
         SELECT 
             {date_group} as period,
@@ -254,7 +188,7 @@ def get_analytics():
             summary[period_key] = {'income': 0, 'expense': 0}
         summary[period_key][transaction_type] = total
 
-    # Category breakdown (existing)
+    # --- Category Breakdown ---
     cursor.execute(f'''
         SELECT 
             {date_group} as period,
@@ -268,12 +202,12 @@ def get_analytics():
     ''', params)
     category_breakdown = {}
     for row in cursor.fetchall():
-        period_key, category, transaction_type, total = row
+        period_key, category_name, transaction_type, total = row
         if period_key not in category_breakdown:
             category_breakdown[period_key] = {'income': {}, 'expense': {}}
-        category_breakdown[period_key][transaction_type][category] = total
+        category_breakdown[period_key][transaction_type][category_name] = total
 
-    # New: Get detailed transactions per period (for expense descriptions)
+    # --- Transaction Details ---
     cursor.execute(f'''
         SELECT
             {date_group} as period,
@@ -287,7 +221,6 @@ def get_analytics():
         {category_filter}
         ORDER BY date DESC, id DESC
     ''', params)
-
     details = {}
     for row in cursor.fetchall():
         period_key = row[0]
@@ -310,7 +243,6 @@ def get_analytics():
         'categoryBreakdown': category_breakdown,
         'details': details
     })
-
 
 
 @app.route('/api/transactions', methods=['GET'])
@@ -340,7 +272,49 @@ def get_transactions():
 
     conn.close()
     return jsonify(transactions)
+@app.route('/api/transactions/<int:transaction_id>', methods=['PUT'])
+def update_transaction(transaction_id):
+    data = request.json
 
+    conn = sqlite3.connect('money_tracker.db')
+    cursor = conn.cursor()
+
+    cursor.execute('SELECT id FROM transactions WHERE id = ?', (transaction_id,))
+    if not cursor.fetchone():
+        conn.close()
+        return jsonify({'error': 'Transaction not found'}), 404
+
+    cursor.execute('''
+        UPDATE transactions
+        SET type = ?, category = ?, amount = ?, description = ?, date = ?
+        WHERE id = ?
+    ''', (
+        data['type'],
+        data['category'],
+        float(data['amount']),
+        data.get('description', ''),
+        data['date'],
+        transaction_id
+    ))
+
+    conn.commit()
+    conn.close()
+    return jsonify({'message': 'Transaction updated successfully'})
+@app.route('/api/transactions/<int:transaction_id>', methods=['DELETE'])
+def delete_transaction(transaction_id):
+    conn = sqlite3.connect('money_tracker.db')
+    cursor = conn.cursor()
+
+    cursor.execute('SELECT id FROM transactions WHERE id = ?', (transaction_id,))
+    if not cursor.fetchone():
+        conn.close()
+        return jsonify({'error': 'Transaction not found'}), 404
+
+    cursor.execute('DELETE FROM transactions WHERE id = ?', (transaction_id,))
+    conn.commit()
+    conn.close()
+
+    return jsonify({'message': 'Transaction deleted successfully'})
 
 if __name__ == '__main__':
     print("Registered routes:")

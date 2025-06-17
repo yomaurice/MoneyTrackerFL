@@ -13,3 +13,5 @@ class Transaction(db.Model):
     amount = db.Column(db.Float, nullable=False)
     description = db.Column(db.String(200))
     date = db.Column(db.Date, nullable=False)
+    is_recurring = db.Column(db.Boolean, default=False)
+    recurrence_months = db.Column(db.Integer, nullable=True)
