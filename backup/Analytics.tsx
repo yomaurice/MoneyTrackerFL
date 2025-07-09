@@ -44,6 +44,7 @@ export default function Analytics({ onEdit }) {
   const [loading, setLoading] = useState(false);
 
 
+
   useEffect(() => {
     fetchAnalytics();
   }, [categoryFilter]);

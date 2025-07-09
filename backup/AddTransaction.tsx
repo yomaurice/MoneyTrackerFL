@@ -8,10 +8,14 @@ const API_BASE_URL = 'http://localhost:5000/api';
 export default function AddTransaction({ onTransactionAdded, transactionToEdit }) {
   const router = useRouter();
   const searchParams = useSearchParams();
-//   const id = searchParams.get('id');
-// const id = transactionToEdit?.id ?? null;
+
 const idFromQuery = searchParams.get('id');
 const id = transactionToEdit?.id ?? idFromQuery;
+
+const [showCategoryEditor, setShowCategoryEditor] = useState(false);
+const [newCategory, setNewCategory] = useState('');
+const [isSuccess, setIsSuccess] = useState(false);
+
 
   const [formData, setFormData] = useState({
     type: 'expense',
@@ -72,6 +76,19 @@ useEffect(() => {
     });
   }
 }, [transactionToEdit]);
+useEffect(() => {
+  if (!transactionToEdit && !idFromQuery) {
+    setFormData({
+      type: 'expense',
+      category: '',
+      amount: '',
+      description: '',
+      date: new Date().toISOString().split('T')[0],
+    });
+    setIsRecurring(false);
+    setRecurrenceMonths(1);
+  }
+}, [transactionToEdit, idFromQuery]);
   const handleInputChange = (e) => {
     const { name, value } = e.target;
     setFormData((prev) => ({ ...prev, [name]: value }));
@@ -102,13 +119,26 @@ useEffect(() => {
       });
 
       if (response.ok) {
+        setIsSuccess(true); // ✅
         setMessage(id ? 'Transaction updated!' : 'Transaction added!');
         onTransactionAdded?.();
+
+        setFormData({
+          type: 'expense',
+          category: '',
+          amount: '',
+          description: '',
+          date: new Date().toISOString().split('T')[0],
+        });
+        setIsRecurring(false);
+        setRecurrenceMonths(1);
+
         setTimeout(() => {
           setMessage('');
 //           router.push('/analytics');
         }, 1000);
       } else {
+        setIsSuccess(false); // ❌
         const data = await response.json();
         setMessage(data.error || 'Failed to save transaction');
       }
@@ -119,6 +149,41 @@ useEffect(() => {
       setLoading(false);
     }
   };
+  const handleToggleCategoryEditor = () => {
+  setShowCategoryEditor((prev) => !prev);
+};
+
+const handleAddCategory = async () => {
+  if (!newCategory.trim()) return;
+
+  const res = await fetch(`${API_BASE_URL}/categories`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ type: formData.type, name: newCategory.trim() }),
+  });
+
+  if (res.ok) {
+    setIsSuccess(true); // ✅
+    const updatedCategories = await res.json();
+    setCategories(updatedCategories);
+    setNewCategory('');
+  }
+};
+
+const handleDeleteCategory = async (name) => {
+  const res = await fetch(`${API_BASE_URL}/category/delete/${encodeURIComponent(name)}`, {
+    method: 'DELETE',
+  });
+
+  if (res.ok) {
+      setIsSuccess(true); // ✅
+    setCategories((prev) => prev.filter((c) => c !== name));
+    if (formData.category === name) {
+      setFormData((prev) => ({ ...prev, category: '' }));
+      console.log("Deleted category:", name);
+    }
+  }
+};
 
   if (loading) return <div>Loading...</div>;
 
@@ -159,23 +224,70 @@ useEffect(() => {
           </div>
         </div>
 
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-2">
-            Category *
-          </label>
-          <select
-            name="category"
-            value={formData.category}
-            onChange={handleInputChange}
-            className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-            required
-          >
-            <option value="">Select a category</option>
-            {categories.map((category) => (
-              <option key={category} value={category}>{category}</option>
-            ))}
-          </select>
-        </div>
+       <div>
+  <label className="block text-sm font-medium text-gray-700 mb-2">
+    Category *
+  </label>
+  <div className="flex items-center gap-4">
+    <select
+      name="category"
+      value={formData.category}
+      onChange={handleInputChange}
+      className="flex-1 px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+      required
+    >
+      <option value="">Select a category</option>
+      {categories.map((category) => (
+        <option key={category} value={category}>{category}</option>
+      ))}
+    </select>
+
+    <button
+      type="button"
+      onClick={handleToggleCategoryEditor}
+      className="text-sm text-blue-600 hover:underline"
+    >
+      {showCategoryEditor ? 'Close' : 'Edit Categories'}
+    </button>
+  </div>
+
+  {showCategoryEditor && (
+    <div className="mt-4 border border-gray-200 p-4 rounded-md bg-gray-50">
+      <h4 className="text-sm font-semibold mb-2">Manage Categories</h4>
+      <ul className="space-y-1 mb-3">
+        {categories.map((cat) => (
+          <li key={cat} className="flex justify-between items-center">
+            <span>{cat}</span>
+            <button
+              type="button"
+              onClick={() => handleDeleteCategory(cat)}
+              className="text-xs text-red-600 hover:underline"
+            >
+              Delete
+            </button>
+          </li>
+        ))}
+      </ul>
+      <div className="flex gap-2">
+        <input
+          type="text"
+          placeholder="New category"
+          value={newCategory}
+          onChange={(e) => setNewCategory(e.target.value)}
+          className="flex-1 px-2 py-1 border border-gray-300 rounded-md text-sm"
+        />
+        <button
+          type="button"
+          onClick={handleAddCategory}
+          className="text-sm bg-blue-500 text-white px-3 py-1 rounded hover:bg-blue-600"
+        >
+          Add
+        </button>
+      </div>
+    </div>
+  )}
+</div>
+
 
         <div>
           <label className="block text-sm font-medium text-gray-700 mb-2">
@@ -260,7 +372,7 @@ useEffect(() => {
         {message && (
           <div
             className={`p-3 rounded-md text-center ${
-              message.includes('success')
+                isSuccess
                 ? 'bg-green-100 text-green-800'
                 : 'bg-red-100 text-red-800'
             }`}

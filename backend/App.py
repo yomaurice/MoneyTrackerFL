@@ -316,6 +316,37 @@ def delete_transaction(transaction_id):
 
     return jsonify({'message': 'Transaction deleted successfully'})
 
+@app.route('/api/categories', methods=['POST'])
+def add_category():
+    data = request.json
+    category = data.get('name')
+    type_ = data.get('type')
+    if not category or not type_:
+        return jsonify({'error': 'Missing data'}), 400
+
+    conn = sqlite3.connect('money_tracker.db')
+    cursor = conn.cursor()
+    try:
+        cursor.execute('INSERT INTO categories (name, type) VALUES (?, ?)', (category, type_))
+    except sqlite3.IntegrityError:
+        pass  # Category already exists
+    conn.commit()
+
+    cursor.execute('SELECT name FROM categories WHERE type = ?', (type_,))
+    categories = [row[0] for row in cursor.fetchall()]
+    conn.close()
+
+    return jsonify(categories)
+
+@app.route('/api/category/delete/<name>', methods=['DELETE'])
+def delete_category(name):
+    conn = sqlite3.connect('money_tracker.db')
+    cursor = conn.cursor()
+    cursor.execute('DELETE FROM categories WHERE name = ?', (name,))
+    conn.commit()
+    conn.close()
+    return jsonify({'message': 'Category deleted'})
+
 if __name__ == '__main__':
     print("Registered routes:")
     for rule in app.url_map.iter_rules():
