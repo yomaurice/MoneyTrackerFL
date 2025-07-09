@@ -42,7 +42,39 @@ export default function Analytics({ onEdit }) {
   const [rawAnalytics, setRawAnalytics] = useState(null);
   const [categoryFilter, setCategoryFilter] = useState('all');
   const [loading, setLoading] = useState(false);
+  const [categoryColors, setCategoryColors] = useState(() => {
+      if (typeof window !== 'undefined') {
+        const stored = localStorage.getItem('categoryColors');
+        return stored ? JSON.parse(stored) : {};
+      }
+      return {};
+  });
 
+function getCategoryColor(category: string) {
+  if (categoryColors[category]) {
+    return categoryColors[category];
+  }
+
+  // Generate a random pastel color
+  const hue = Math.floor(Math.random() * 360);
+  const backgroundColor = `hsl(${hue}, 100%, 90%)`;
+  const color = `hsl(${hue}, 80%, 30%)`;
+
+  const newColor = { backgroundColor, color };
+
+  setCategoryColors((prev) => ({
+    ...prev,
+    [category]: newColor,
+  }));
+
+  return newColor;
+}
+
+useEffect(() => {
+  if (typeof window !== 'undefined') {
+    localStorage.setItem('categoryColors', JSON.stringify(categoryColors));
+  }
+}, [categoryColors]);
 
 
   useEffect(() => {
@@ -287,7 +319,23 @@ export default function Analytics({ onEdit }) {
               {expenseList.map((tx) => (
   <div key={tx.id} className="border-b border-gray-200 py-2 last:border-none">
     <div className="flex justify-between items-center text-sm">
-      <span className="font-medium text-gray-700">{tx.category}</span>
+        {(() => {
+          const color = getCategoryColor(tx.category);
+          return (
+            <span
+              style={{
+                backgroundColor: color.backgroundColor,
+                color: color.color,
+                padding: '2px 8px',
+                borderRadius: '6px',
+                fontSize: '0.875rem',
+                fontWeight: 500,
+              }}
+            >
+              {tx.category}
+            </span>
+          );
+        })()}
       <span className="text-red-600">{formatCurrency(tx.amount)}</span>
     </div>
 
