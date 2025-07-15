@@ -7,7 +7,6 @@ import calendar
 from flask_sqlalchemy import SQLAlchemy
 from dateutil.relativedelta import relativedelta
 
-from flask_migrate import Migrate
 import os
 from dotenv import load_dotenv
 from models import Transaction  # Import your SQLAlchemy models
