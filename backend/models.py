@@ -1,22 +1,29 @@
-import datetime
-
+from werkzeug.security import generate_password_hash, check_password_hash
 from flask_sqlalchemy import SQLAlchemy
 
 db = SQLAlchemy()
 
-class Transaction(db.Model):
-    __tablename__ = 'transactions'
-
+class User(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    type = db.Column(db.String(10), nullable=False)
-    category = db.Column(db.String(100), nullable=False)
-    amount = db.Column(db.Float, nullable=False)
-    description = db.Column(db.String(200))
-    date = db.Column(db.Date, nullable=False)
-    is_recurring = db.Column(db.Boolean, default=False)
-    recurrence_months = db.Column(db.Integer, nullable=True)
+    username = db.Column(db.String(150), unique=True, nullable=False)
+    password_hash = db.Column(db.String(256), nullable=False)
 
+    def set_password(self, password):
+        self.password_hash = generate_password_hash(password)
+
+    def check_password(self, password):
+        return check_password_hash(self.password_hash, password)
+
+# Add a user_id foreign key to Transaction and Category models:
 class Category(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    name = db.Column(db.String(100), unique=True, nullable=False)
-    type = db.Column(db.String(50), nullable=False)  # 'income' or 'expense'
+    name = db.Column(db.String)
+    type = db.Column(db.String)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+
+class Transaction(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String)
+    amount = db.Column(db.Float)
+    category_id = db.Column(db.Integer, db.ForeignKey('category.id'))
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
