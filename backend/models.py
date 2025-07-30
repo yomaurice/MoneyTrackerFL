@@ -23,7 +23,9 @@ class Category(db.Model):
 
 class Transaction(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    name = db.Column(db.String)
-    amount = db.Column(db.Float)
-    category_id = db.Column(db.Integer, db.ForeignKey('category.id'))
+    type = db.Column(db.String, nullable=False)  # 'income' or 'expense'
+    category = db.Column(db.String, nullable=False)  # category name or could be foreign key
+    amount = db.Column(db.Float, nullable=False)
+    description = db.Column(db.String)
+    date = db.Column(db.Date, nullable=False)
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
