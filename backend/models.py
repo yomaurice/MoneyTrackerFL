@@ -16,7 +16,7 @@ class User(db.Model):
 
 # Add a user_id foreign key to Transaction and Category models:
 class Category(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
     name = db.Column(db.String)
     type = db.Column(db.String)
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
