@@ -163,7 +163,6 @@ def get_analytics(user_id):
     })
 
 
-
 @app.route('/api/transactions', methods=['GET'])
 @login_required
 def get_transactions(user_id):
@@ -187,12 +186,12 @@ def update_transaction(transaction_id, user_id):
     if not tx:
         return jsonify({'error': 'Transaction not found'}), 404
 
-
     tx.type = data['type']
     tx.category = data['category']
     tx.amount = float(data['amount'])
     tx.description = data.get('description', '')
     tx.date = datetime.datetime.strptime(data['date'], '%Y-%m-%d').date()
+    tx.user_id = user_id
 
     db.session.commit()
     return jsonify({'message': 'Transaction updated successfully'})
