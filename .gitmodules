@@ -1,0 +1,3 @@
+[submodule "MoneyTracker_frontend"]
+	path = MoneyTracker_frontend
+	url = https://github.com/yomaurice/MoneyTracker_frontend
