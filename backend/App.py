@@ -265,6 +265,12 @@ def login():
         return jsonify({'token': token})
     return jsonify({'message': 'Invalid credentials'}), 401
 
+@app.errorhandler(Exception)
+def handle_exception(e):
+    # Optionally, you can log the error to console or file
+    print(e)
+    return jsonify({"error": str(e)}), 500
+
 if __name__ == '__main__':
     print("Registered routes:")
     for rule in app.url_map.iter_rules():
