@@ -1,3 +1,6 @@
+import sys
+import traceback
+
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import datetime
@@ -6,7 +9,7 @@ from flask_sqlalchemy import SQLAlchemy
 from models import db, User, Transaction, Category
 import os
 from dotenv import load_dotenv
-
+import logging
 import jwt
 from functools import wraps
 
@@ -14,7 +17,8 @@ from functools import wraps
 load_dotenv()
 app = Flask(__name__)
 
-app.config['SECRET_KEY'] = 'your-secret-key'
+# app.config['SECRET_KEY'] = 'your-secret-key'
+app.secret_key = os.environ.get("SECRET_KEY", "dev-secret-key")
 app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URL')
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
@@ -22,6 +26,7 @@ db.init_app(app)
 # CORS(app, supports_credentials=True, origins=["http://localhost:3000"])
 # CORS(app, supports_credentials=True, resources={r"/api/*": {"origins": "http://localhost:3000"}}, methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
 CORS(app, supports_credentials=True, resources={r"/api/*": {"origins": "*"}})
+logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
 
 with app.app_context():
     db.create_all()
@@ -267,8 +272,7 @@ def login():
 
 @app.errorhandler(Exception)
 def handle_exception(e):
-    # Optionally, you can log the error to console or file
-    print(e)
+    logging.error(traceback.format_exc())
     return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
