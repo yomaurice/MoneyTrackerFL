@@ -5,5 +5,5 @@ gunicorn
 flask_sqlalchemy==3.0.5
 psycopg2-binary
 dotenv
-jwt
+pyjwt
 cd
