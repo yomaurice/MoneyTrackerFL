@@ -23,8 +23,7 @@ app.config['SQLALCHEMY_DATABASE_URI'] = os.environ["DATABASE_URL"]
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {
     "connect_args": {
-        "sslmode": "require",
-        "sslrootcert": "/opt/render/project/src/backend/certs/render-ca.pem",
+        "sslmode": "require"
     }
 }
 
