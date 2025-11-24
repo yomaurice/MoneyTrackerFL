@@ -21,11 +21,13 @@ app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "dev-secret-key")
 app.config['SQLALCHEMY_DATABASE_URI'] = os.environ["DATABASE_URL"]
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
+app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {
     "connect_args": {
-        "sslmode": "allow"
+        "sslmode": "require",
+        "sslrootcert": "/opt/render/project/src/backend/certs/render-ca.pem",
     }
 }
+
 print("DATABASE_URL:", os.environ.get("DATABASE_URL"))
 
 db.init_app(app)
