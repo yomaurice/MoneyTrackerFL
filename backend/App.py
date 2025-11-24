@@ -23,7 +23,7 @@ app.config['SQLALCHEMY_DATABASE_URI'] = os.environ["DATABASE_URL"]
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
     "connect_args": {
-        "sslmode": "require"
+        "sslmode": "allow"
     }
 }
 print("DATABASE_URL:", os.environ.get("DATABASE_URL"))
