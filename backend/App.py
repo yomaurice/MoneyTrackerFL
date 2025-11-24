@@ -284,15 +284,26 @@ def signup():
 
 @app.route('/api/login', methods=['POST'])
 def login():
-    data = request.get_json()
-    username = data['username']
-    password = data['password']
+    # Safe JSON parsing
+    data = request.get_json(silent=True)
+
+    if not data:
+        return jsonify({'message': 'Invalid JSON body'}), 400
+
+    username = data.get('username')
+    password = data.get('password')
+
+    if not username or not password:
+        return jsonify({'message': 'Username and password are required'}), 400
 
     user = User.query.filter_by(username=username).first()
+
     if user and user.check_password(password):
         token = generate_token(user.id)
-        return jsonify({'token': token})
+        return jsonify({'token': token}), 200
+
     return jsonify({'message': 'Invalid credentials'}), 401
+
 
 @app.errorhandler(Exception)
 def handle_exception(e):
