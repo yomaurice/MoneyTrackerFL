@@ -261,9 +261,16 @@ def delete_category(name, user_id):
 
 @app.route('/api/signup', methods=['POST'])
 def signup():
-    data = request.get_json()
-    username = data['username']
-    password = data['password']
+    data = request.get_json(silent=True)
+
+    if not data:
+        return jsonify({'message': 'Invalid JSON body'}), 400
+
+    username = data.get('username')
+    password = data.get('password')
+
+    if not username or not password:
+        return jsonify({'message': 'Username and password required'}), 400
 
     if User.query.filter_by(username=username).first():
         return jsonify({'message': 'Username already exists'}), 400
@@ -272,6 +279,7 @@ def signup():
     user.set_password(password)
     db.session.add(user)
     db.session.commit()
+
     return jsonify({'message': 'User created'}), 201
 
 @app.route('/api/login', methods=['POST'])
