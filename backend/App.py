@@ -23,7 +23,7 @@ app.config['SQLALCHEMY_DATABASE_URI'] = os.environ["DATABASE_URL"]
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {
     "connect_args": {
-        "sslmode": "require"
+        "sslmode": "disable"
     }
 }
 
@@ -32,10 +32,16 @@ print("DATABASE_URL:", os.environ.get("DATABASE_URL"))
 db.init_app(app)
 # CORS(app, supports_credentials=True, origins=["http://localhost:3000"])
 # CORS(app, supports_credentials=True, resources={r"/api/*": {"origins": "http://localhost:3000"}}, methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
-CORS(app, supports_credentials=True, resources={r"/api/*": {"origins": "https://money-tracker1.vercel.app"}},
+CORS(app,
+     supports_credentials=True,
+     resources={r"/*": {"origins": [
+         "https://money-tracker1.vercel.app",
+         "https://moneytrackerfl.onrender.com"
+     ]}},
      methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
      allow_headers=["Content-Type", "Authorization"]
-     )
+)
+
 logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
 
 with app.app_context():
