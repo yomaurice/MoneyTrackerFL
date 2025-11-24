@@ -26,6 +26,7 @@ app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
         "sslmode": "require"
     }
 }
+print("DATABASE_URL:", os.environ.get("DATABASE_URL"))
 
 db.init_app(app)
 # CORS(app, supports_credentials=True, origins=["http://localhost:3000"])
