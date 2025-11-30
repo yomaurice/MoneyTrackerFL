@@ -74,6 +74,28 @@ def login_required(f):
     return decorated
 
 
+@app.route('/api/categories', methods=['GET'])
+def get_all_categories():
+    auth_header = request.headers.get('Authorization')
+    if not auth_header or not auth_header.startswith('Bearer '):
+        return jsonify({'error': 'Missing token'}), 401
+
+    token = auth_header.split(' ')[1]
+
+    try:
+        payload = jwt.decode(token, app.config['SECRET_KEY'], algorithms=['HS256'])
+        user_id = payload['user_id']
+
+        # Fetch both income + expense categories
+        categories = Category.query.filter_by(user_id=user_id).all()
+
+        return jsonify([{"name": c.name, "type": c.type} for c in categories])
+
+    except jwt.ExpiredSignatureError:
+        return jsonify({'error': 'Token expired'}), 401
+    except jwt.InvalidTokenError:
+        return jsonify({'error': 'Invalid token'}), 401
+
 
 @app.route('/api/categories/<type>', methods=['GET'])
 def get_categories(type):
