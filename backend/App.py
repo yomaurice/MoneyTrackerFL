@@ -37,6 +37,7 @@ CORS(app,
      resources={r"/*": {"origins": [
          "https://money-tracker1.vercel.app",
          "https://moneytrackerfl.onrender.com",
+         "https://trackex.store",
          r"https://.*\.vercel\.app"
      ]}},
      methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
