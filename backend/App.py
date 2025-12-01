@@ -281,6 +281,16 @@ def delete_category(name, user_id):
         db.session.commit()
     return jsonify({'message': 'Category deleted'})
 
+@app.route("/years", methods=["GET"])
+def get_years_with_data():
+    years = (
+        db.session.query(db.extract('year', Transaction.date).label('year'))
+        .group_by('year')
+        .order_by('year')
+        .all()
+    )
+    # format: [(2023,), (2024,), ...] → just extract the int
+    return {"years": [int(y[0]) for y in years]}
 
 @app.route('/api/signup', methods=['POST'])
 def signup():
