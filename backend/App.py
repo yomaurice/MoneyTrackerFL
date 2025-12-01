@@ -36,7 +36,8 @@ CORS(app,
      supports_credentials=True,
      resources={r"/*": {"origins": [
          "https://money-tracker1.vercel.app",
-         "https://moneytrackerfl.onrender.com"
+         "https://moneytrackerfl.onrender.com",
+         r"https://.*\.vercel\.app"
      ]}},
      methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
      allow_headers=["Content-Type", "Authorization"]
