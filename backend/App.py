@@ -338,6 +338,10 @@ def login():
 
     return jsonify({'message': 'Invalid credentials'}), 401
 
+# endpoint of to keep backend alive and reactive
+@app.route("/api/health")
+def health():
+    return {"status": "ok"}, 200
 
 @app.errorhandler(Exception)
 def handle_exception(e):
