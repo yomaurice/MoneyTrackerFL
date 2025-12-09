@@ -94,6 +94,8 @@ def generate_token(user_id):
 #     except jwt.InvalidTokenError:
 #         return None
 
+from flask import g
+
 def login_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
@@ -105,8 +107,10 @@ def login_required(f):
         if not user_id:
             return jsonify({'message': 'Access token expired'}), 401
 
-        return f(user_id=user_id, *args, **kwargs)
+        g.user_id = user_id
+        return f(*args, **kwargs)
     return decorated
+
 
 
 
@@ -374,7 +378,8 @@ def login():
         httponly=True,
         secure=True,
         samesite='None',  # IMPORTANT for Vercel ↔ Render
-        max_age=15 * 60
+        max_age=15 * 60,
+        path='/'
     )
     resp.set_cookie(
         'refresh_token',
@@ -382,7 +387,8 @@ def login():
         httponly=True,
         secure=True,
         samesite='None',
-        max_age=14 * 24 * 60 * 60
+        max_age=14 * 24 * 60 * 60,
+        path='/'
     )
 
     return resp, 200
@@ -397,8 +403,8 @@ def logout():
 
 @app.route('/api/me', methods=['GET'])
 @login_required
-def me(user_id):
-    user = User.query.get(user_id)
+def me():
+    user = User.query.get(g.user_id)
     return jsonify({
         'id': user.id,
         'username': user.username
