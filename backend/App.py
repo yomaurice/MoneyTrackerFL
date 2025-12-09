@@ -395,7 +395,7 @@ def logout():
     return resp
 
 
-@app.route('/api/me')
+@app.route('/api/me', methods=['GET'])
 @login_required
 def me(user_id):
     user = User.query.get(user_id)
