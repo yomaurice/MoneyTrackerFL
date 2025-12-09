@@ -403,6 +403,7 @@ def me(user_id):
         'id': user.id,
         'username': user.username
     })
+
 # endpoint of to keep backend alive and reactive
 @app.route("/api/health")
 def health():
