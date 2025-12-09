@@ -1,0 +1,17 @@
+# Node
+node_modules/
+frontend/node_modules/
+frontend/.next/
+.next/
+
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# IDE
+.idea/
+
+# Env
+.env

@@ -49,6 +49,35 @@ logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
 with app.app_context():
     db.create_all()
 
+def generate_access_token(user_id):
+    payload = {
+        'user_id': user_id,
+        'type': 'access',
+        'exp': datetime.datetime.utcnow() + datetime.timedelta(minutes=15)
+    }
+    return jwt.encode(payload, app.config['SECRET_KEY'], algorithm='HS256')
+
+
+def generate_refresh_token(user_id):
+    payload = {
+        'user_id': user_id,
+        'type': 'refresh',
+        'exp': datetime.datetime.utcnow() + datetime.timedelta(days=14)
+    }
+    return jwt.encode(payload, app.config['SECRET_KEY'], algorithm='HS256')
+
+
+def decode_token(token, expected_type):
+    try:
+        payload = jwt.decode(token, app.config['SECRET_KEY'], algorithms=['HS256'])
+        if payload.get('type') != expected_type:
+            return None
+        return payload['user_id']
+    except jwt.ExpiredSignatureError:
+        return None
+    except jwt.InvalidTokenError:
+        return None
+
 def generate_token(user_id):
     payload = {
         'user_id': user_id,
@@ -56,24 +85,29 @@ def generate_token(user_id):
     }
     return jwt.encode(payload, app.config['SECRET_KEY'], algorithm='HS256')
 
-def decode_token(token):
-    try:
-        payload = jwt.decode(token, app.config['SECRET_KEY'], algorithms=['HS256'])
-        return payload['user_id']
-    except jwt.ExpiredSignatureError:
-        return None
-    except jwt.InvalidTokenError:
-        return None
+# def decode_token(token):
+#     try:
+#         payload = jwt.decode(token, app.config['SECRET_KEY'], algorithms=['HS256'])
+#         return payload['user_id']
+#     except jwt.ExpiredSignatureError:
+#         return None
+#     except jwt.InvalidTokenError:
+#         return None
 
 def login_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
-        token = request.headers.get('Authorization', '').replace('Bearer ', '')
-        user_id = decode_token(token)
-        if not user_id:
+        token = request.cookies.get('access_token')
+        if not token:
             return jsonify({'message': 'Unauthorized'}), 401
+
+        user_id = decode_token(token, 'access')
+        if not user_id:
+            return jsonify({'message': 'Access token expired'}), 401
+
         return f(user_id=user_id, *args, **kwargs)
     return decorated
+
 
 
 @app.route('/api/categories', methods=['GET'])
@@ -318,26 +352,57 @@ def signup():
 
 @app.route('/api/login', methods=['POST'])
 def login():
-    # Safe JSON parsing
     data = request.get_json(silent=True)
-
     if not data:
         return jsonify({'message': 'Invalid JSON body'}), 400
 
     username = data.get('username')
     password = data.get('password')
 
-    if not username or not password:
-        return jsonify({'message': 'Username and password are required'}), 400
-
     user = User.query.filter_by(username=username).first()
 
-    if user and user.check_password(password):
-        token = generate_token(user.id)
-        return jsonify({'token': token}), 200
+    if not user or not user.check_password(password):
+        return jsonify({'message': 'Invalid credentials'}), 401
 
-    return jsonify({'message': 'Invalid credentials'}), 401
+    access_token = generate_access_token(user.id)
+    refresh_token = generate_refresh_token(user.id)
 
+    resp = jsonify({'message': 'Login successful'})
+    resp.set_cookie(
+        'access_token',
+        access_token,
+        httponly=True,
+        secure=True,
+        samesite='None',  # IMPORTANT for Vercel ↔ Render
+        max_age=15 * 60
+    )
+    resp.set_cookie(
+        'refresh_token',
+        refresh_token,
+        httponly=True,
+        secure=True,
+        samesite='None',
+        max_age=14 * 24 * 60 * 60
+    )
+
+    return resp, 200
+
+@app.route('/api/logout', methods=['POST'])
+def logout():
+    resp = jsonify({'message': 'Logged out'})
+    resp.delete_cookie('access_token')
+    resp.delete_cookie('refresh_token')
+    return resp
+
+
+@app.route('/api/me')
+@login_required
+def me(user_id):
+    user = User.query.get(user_id)
+    return jsonify({
+        'id': user.id,
+        'username': user.username
+    })
 # endpoint of to keep backend alive and reactive
 @app.route("/api/health")
 def health():
