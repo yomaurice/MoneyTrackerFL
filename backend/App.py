@@ -134,7 +134,8 @@ def get_categories(type):
 
 @app.route('/api/transactions', methods=['POST'])
 @login_required
-def add_transaction(user_id):
+def add_transaction():
+    user_id = g.user_id
     data = request.json
     start_date = datetime.datetime.strptime(data.get('date'), '%Y-%m-%d')
     recurrence_months = int(data.get('recurrence_months', 1)) if data.get('is_recurring') else 1
@@ -165,7 +166,8 @@ def add_transaction(user_id):
 
 @app.route('/api/analytics', methods=['GET'])
 @login_required
-def get_analytics(user_id):
+def get_analytics():
+    user_id = g.user_id
     period = request.args.get('period', 'monthly')
     categories = request.args.get('categories', '')
     category = request.args.get('category', '')
@@ -225,7 +227,8 @@ def get_analytics(user_id):
 
 @app.route('/api/transactions', methods=['GET'])
 @login_required
-def get_transactions(user_id):
+def get_transactions():
+    user_id = g.user_id
     transactions = Transaction.query.filter_by(user_id=user_id).order_by(Transaction.date.desc(), Transaction.created_at.desc()).limit(100).all()
     return jsonify([{
         'id': tx.id,
@@ -240,7 +243,8 @@ def get_transactions(user_id):
 
 @app.route('/api/transactions/<int:transaction_id>', methods=['PUT'])
 @login_required
-def update_transaction(transaction_id, user_id):
+def update_transaction(transaction_id):
+    user_id = g.user_id
     data = request.json
     tx = Transaction.query.filter_by(id=transaction_id, user_id=user_id).first()
     if not tx:
@@ -258,7 +262,8 @@ def update_transaction(transaction_id, user_id):
 
 @app.route('/api/transactions/<int:transaction_id>', methods=['DELETE'])
 @login_required
-def delete_transaction(transaction_id, user_id):
+def delete_transaction(transaction_id):
+    user_id = g.user_id
     tx = Transaction.query.filter_by(id=transaction_id, user_id=user_id).first()
     if not tx:
         return jsonify({'error': 'Transaction not found'}), 404
@@ -269,7 +274,8 @@ def delete_transaction(transaction_id, user_id):
 
 @app.route('/api/categories', methods=['POST'])
 @login_required
-def add_category(user_id):
+def add_category():
+    user_id = g.user_id
     data = request.json
     name = data.get('name')
     type_ = data.get('type')
@@ -289,7 +295,8 @@ def add_category(user_id):
 
 @app.route('/api/category/delete/<name>', methods=['DELETE'])
 @login_required
-def delete_category(name, user_id):
+def delete_category(name):
+    user_id = g.user_id
     category = Category.query.filter_by(name=name, user_id=user_id).first()
     if category:
         db.session.delete(category)
