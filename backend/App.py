@@ -112,49 +112,25 @@ def login_required(f):
     return decorated
 
 
-
-
 @app.route('/api/categories', methods=['GET'])
+@login_required
 def get_all_categories():
-    auth_header = request.headers.get('Authorization')
-    if not auth_header or not auth_header.startswith('Bearer '):
-        return jsonify({'error': 'Missing token'}), 401
-
-    token = auth_header.split(' ')[1]
-
-    try:
-        payload = jwt.decode(token, app.config['SECRET_KEY'], algorithms=['HS256'])
-        user_id = payload['user_id']
-
-        # Fetch both income + expense categories
-        categories = Category.query.filter_by(user_id=user_id).all()
-
-        return jsonify([{"name": c.name, "type": c.type} for c in categories])
-
-    except jwt.ExpiredSignatureError:
-        return jsonify({'error': 'Token expired'}), 401
-    except jwt.InvalidTokenError:
-        return jsonify({'error': 'Invalid token'}), 401
+    categories = Category.query.filter_by(user_id=g.user_id).all()
+    return jsonify([
+        {"name": c.name, "type": c.type}
+        for c in categories
+    ])
 
 
 @app.route('/api/categories/<type>', methods=['GET'])
+@login_required
 def get_categories(type):
-    auth_header = request.headers.get('Authorization')
-    if not auth_header or not auth_header.startswith('Bearer '):
-        return jsonify({'error': 'Missing token'}), 401
+    categories = Category.query.filter_by(
+        type=type,
+        user_id=g.user_id
+    ).all()
+    return jsonify([cat.name for cat in categories])
 
-    token = auth_header.split(' ')[1]
-
-    try:
-        payload = jwt.decode(token, app.config['SECRET_KEY'], algorithms=['HS256'])
-        user_id = payload['user_id']
-        categories = Category.query.filter_by(type=type, user_id=user_id).all()
-        return jsonify([cat.name for cat in categories])
-
-    except jwt.ExpiredSignatureError:
-        return jsonify({'error': 'Token expired'}), 401
-    except jwt.InvalidTokenError:
-        return jsonify({'error': 'Invalid token'}), 401
 
 @app.route('/api/transactions', methods=['POST'])
 @login_required
@@ -400,6 +376,42 @@ def logout():
     resp.delete_cookie('refresh_token')
     return resp
 
+@app.route('/api/refresh', methods=['POST'])
+def refresh():
+    token = request.cookies.get('refresh_token')
+
+    if not token:
+        return jsonify({'message': 'No refresh token'}), 401
+
+    try:
+        payload = jwt.decode(
+            token,
+            app.config['SECRET_KEY'],
+            algorithms=['HS256']
+        )
+        if payload.get('type') != 'refresh':
+            return jsonify({'message': 'Invalid token type'}), 401
+
+        user_id = payload['user_id']
+
+    except jwt.ExpiredSignatureError:
+        return jsonify({'message': 'Refresh token expired'}), 401
+    except jwt.InvalidTokenError:
+        return jsonify({'message': 'Invalid refresh token'}), 401
+
+    new_access = generate_access_token(user_id)
+
+    resp = jsonify({'message': 'refreshed'})
+    resp.set_cookie(
+        'access_token',
+        new_access,
+        httponly=True,
+        secure=True,
+        samesite='None',
+        path='/',
+        max_age=15 * 60
+    )
+    return resp
 
 @app.route('/api/me', methods=['GET'])
 @login_required
