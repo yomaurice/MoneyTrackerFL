@@ -403,6 +403,74 @@ def logout():
     resp.delete_cookie('refresh_token')
     return resp
 
+@app.route('/api/request_password_reset', methods=['POST'])
+def request_password_reset():
+    data = request.get_json(silent=True)
+    if not data or not data.get("username"):
+        return jsonify({"message": "Username required"}), 400
+
+    username = data["username"]
+    user = User.query.filter_by(username=username).first()
+
+    # Do NOT reveal whether user exists (security best practice)
+    if not user:
+        return jsonify({"message": "If the username exists, a reset link will be provided."}), 200
+
+    # Create temporary reset token (valid 15 min)
+    reset_token = jwt.encode(
+        {
+            "user_id": user.id,
+            "type": "password_reset",
+            "exp": datetime.datetime.utcnow() + datetime.timedelta(minutes=15)
+        },
+        app.config["SECRET_KEY"],
+        algorithm="HS256"
+    )
+
+    # For now we return the token directly (since no email system)
+    # In the future, email this to the user instead.
+    return jsonify({
+        "message": "Password reset token generated.",
+        "reset_token": reset_token
+    }), 200
+
+@app.route('/api/reset_password', methods=['POST'])
+def reset_password():
+    data = request.get_json(silent=True)
+    if not data:
+        return jsonify({"message": "Invalid JSON"}), 400
+
+    token = data.get("token")
+    new_password = data.get("new_password")
+
+    if not token or not new_password:
+        return jsonify({"message": "Token and new password required"}), 400
+
+    try:
+        payload = jwt.decode(
+            token,
+            app.config["SECRET_KEY"],
+            algorithms=["HS256"]
+        )
+
+        if payload.get("type") != "password_reset":
+            return jsonify({"message": "Invalid reset token"}), 400
+
+        user = User.query.get(payload["user_id"])
+        if not user:
+            return jsonify({"message": "User not found"}), 404
+
+        user.set_password(new_password)
+        db.session.commit()
+
+        return jsonify({"message": "Password successfully reset"}), 200
+
+    except jwt.ExpiredSignatureError:
+        return jsonify({"message": "Reset token expired"}), 400
+    except jwt.InvalidTokenError:
+        return jsonify({"message": "Invalid reset token"}), 400
+
+
 
 @app.route('/api/refresh', methods=['POST'])
 def refresh():
