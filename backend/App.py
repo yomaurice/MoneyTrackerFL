@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 import logging
 import jwt
 from functools import wraps
+import re
 
 
 load_dotenv()
@@ -321,15 +322,34 @@ def signup():
     if not data:
         return jsonify({'message': 'Invalid JSON body'}), 400
 
-    username = data.get('username')
-    password = data.get('password')
+    username = data.get('username', '').strip()
+    password = data.get('password', '').strip()
 
+    # -------------------------------
+    # 1. BASIC VALIDATION
+    # -------------------------------
     if not username or not password:
         return jsonify({'message': 'Username and password required'}), 400
 
+    # Username format
+    if not re.match(r'^[A-Za-z0-9_]{3,20}$', username):
+        return jsonify({
+            'message': 'Username must be 3–20 characters (letters, numbers, underscore).'
+        }), 400
+
+    # Password rules
+    if len(password) < 6:
+        return jsonify({'message': 'Password must be at least 6 characters long.'}), 400
+
+    # -------------------------------
+    # UNIQUE USERNAME CHECK
+    # -------------------------------
     if User.query.filter_by(username=username).first():
         return jsonify({'message': 'Username already exists'}), 400
 
+    # -------------------------------
+    # CREATE USER
+    # -------------------------------
     user = User(username=username)
     user.set_password(password)
     db.session.add(user)
@@ -383,6 +403,7 @@ def logout():
     resp.delete_cookie('refresh_token')
     return resp
 
+
 @app.route('/api/refresh', methods=['POST'])
 def refresh():
     token = request.cookies.get('refresh_token')
@@ -419,6 +440,17 @@ def refresh():
         max_age=15 * 60
     )
     return resp
+
+@app.route('/api/check_username', methods=['GET'])
+def check_username():
+    username = request.args.get('username', '').strip()
+
+    if not username:
+        return jsonify({'available': False, 'message': 'Missing username'}), 400
+
+    taken = User.query.filter_by(username=username).first() is not None
+
+    return jsonify({'available': not taken})
 
 @app.route('/api/me', methods=['GET'])
 @login_required
