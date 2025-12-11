@@ -411,30 +411,43 @@ def logout():
 @app.route('/api/request_password_reset', methods=['POST'])
 def request_password_reset():
     data = request.get_json()
-    email = data.get("email")
+    username = data.get("username")
 
-    if not email:
-        return jsonify({"message": "Email required"}), 400
+    # consistent message for security
+    generic_msg = {"message": "If account exists, email has been sent"}
 
-    user = User.query.filter_by(username=email).first()
+    if not username:
+        return jsonify({"message": "Username required"}), 400
+
+    # find user
+    user = User.query.filter_by(username=username).first()
+
+    # If user doesn't exist → still return generic message
     if not user:
-        return jsonify({"message": "If account exists, email has been sent"}), 200
+        return jsonify(generic_msg), 200
 
-    # create token
+    # Create reset token
     token = jwt.encode(
-        {"user_id": user.id, "exp": datetime.datetime.utcnow() + datetime.timedelta(minutes=15)},
+        {
+            "user_id": user.id,
+            "exp": datetime.datetime.utcnow() + datetime.timedelta(minutes=15)
+        },
         app.config["SECRET_KEY"],
         algorithm="HS256"
     )
+    user.reset_token = token
+    user.reset_token_expiration = datetime.datetime.utcnow() + datetime.timedelta(minutes=15)
+    db.session.commit()
 
-    # send email
+    # Send email to the user's registered email
     try:
-        send_password_reset_email(email, token)
+        send_reset_email(user.email, token)
     except Exception as e:
-        print(e)
+        print("EMAIL ERROR:", e)
         return jsonify({"message": "Error sending email"}), 500
 
-    return jsonify({"message": "Password reset email sent"}), 200
+    return jsonify(generic_msg), 200
+
 
 @app.route('/api/reset_password', methods=['POST'])
 def reset_password():
