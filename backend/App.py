@@ -442,7 +442,7 @@ def request_password_reset():
     user.reset_token_expiration = datetime.datetime.utcnow() + datetime.timedelta(minutes=15)
     db.session.commit()
 
-    FRONTEND_URL = "https://money-tracker1.vercel.app"
+    FRONTEND_URL = "https://money-tracker1-git-addpasswordreset-yonamaur-7820s-projects.vercel.app"
     reset_link = f"{FRONTEND_URL}/reset-password?token={token}"
 
     # or your real custom domain when ready
