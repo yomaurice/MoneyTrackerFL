@@ -12,8 +12,7 @@ from dotenv import load_dotenv
 import logging
 import jwt
 from functools import wraps
-
-from twilio.rest import Client
+import resend
 
 RESET_TOKEN_EXPIRE_MIN = 20
 
@@ -54,26 +53,23 @@ logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
 with app.app_context():
     db.create_all()
 
-def send_password_reset_email(to_email, token):
-    account_sid = os.getenv("TWILIO_ACCOUNT_SID")
-    auth_token = os.getenv("TWILIO_AUTH_TOKEN")
+resend.api_key = os.getenv("RESEND_API_KEY")
 
-    client = Client(account_sid, auth_token)
+def send_reset_email(to_email, reset_link):
+    try:
+        params = {
+            "from": "MoneyTracker <onboarding@resend.dev>",
+            "to": [to_email],
+            "subject": "Reset your password",
+            "html": f"<p>Click here to reset your password:</p><a href='{reset_link}'>{reset_link}</a>"
+        }
 
-    reset_url = f"https://money-tracker1.vercel.app/reset_password?token={token}"
-
-    message = client.messages.create(
-        messaging_service_sid=os.getenv("TWILIO_MESSAGING_SID"),
-        to=to_email,
-        body=(
-            "Password Reset Request\n\n"
-            "Click the link below to reset your password:\n"
-            f"{reset_url}\n\n"
-            "If you didn't request this, just ignore this email."
-        )
-    )
-
-    return message.sid
+        email = resend.Emails.send(params)
+        print("Email sent:", email)
+        return True
+    except Exception as e:
+        print("Resend ERROR:", e)
+        return False
 
 def generate_access_token(user_id):
     payload = {
