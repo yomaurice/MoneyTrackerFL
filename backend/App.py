@@ -12,7 +12,11 @@ from dotenv import load_dotenv
 import logging
 import jwt
 from functools import wraps
-import re
+
+from twilio.rest import Client
+
+RESET_TOKEN_EXPIRE_MIN = 20
+
 
 
 load_dotenv()
@@ -49,6 +53,27 @@ logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
 
 with app.app_context():
     db.create_all()
+
+def send_password_reset_email(to_email, token):
+    account_sid = os.getenv("TWILIO_ACCOUNT_SID")
+    auth_token = os.getenv("TWILIO_AUTH_TOKEN")
+
+    client = Client(account_sid, auth_token)
+
+    reset_url = f"https://money-tracker1.vercel.app/reset_password?token={token}"
+
+    message = client.messages.create(
+        messaging_service_sid=os.getenv("TWILIO_MESSAGING_SID"),
+        to=to_email,
+        body=(
+            "Password Reset Request\n\n"
+            "Click the link below to reset your password:\n"
+            f"{reset_url}\n\n"
+            "If you didn't request this, just ignore this email."
+        )
+    )
+
+    return message.sid
 
 def generate_access_token(user_id):
     payload = {
@@ -319,43 +344,27 @@ def get_years_with_data():
 def signup():
     data = request.get_json(silent=True)
 
-    if not data:
-        return jsonify({'message': 'Invalid JSON body'}), 400
+    username = data.get('username')
+    password = data.get('password')
+    email = data.get('email')
 
-    username = data.get('username', '').strip()
-    password = data.get('password', '').strip()
+    if not username or not password or not email:
+        return jsonify({'message': 'Username, email and password required'}), 400
 
-    # -------------------------------
-    # 1. BASIC VALIDATION
-    # -------------------------------
-    if not username or not password:
-        return jsonify({'message': 'Username and password required'}), 400
-
-    # Username format
-    if not re.match(r'^[A-Za-z0-9_]{3,20}$', username):
-        return jsonify({
-            'message': 'Username must be 3–20 characters (letters, numbers, underscore).'
-        }), 400
-
-    # Password rules
-    if len(password) < 6:
-        return jsonify({'message': 'Password must be at least 6 characters long.'}), 400
-
-    # -------------------------------
-    # UNIQUE USERNAME CHECK
-    # -------------------------------
     if User.query.filter_by(username=username).first():
         return jsonify({'message': 'Username already exists'}), 400
 
-    # -------------------------------
-    # CREATE USER
-    # -------------------------------
-    user = User(username=username)
+    if User.query.filter_by(email=email).first():
+        return jsonify({'message': 'Email already exists'}), 400
+
+    user = User(username=username, email=email)
     user.set_password(password)
+
     db.session.add(user)
     db.session.commit()
 
     return jsonify({'message': 'User created'}), 201
+
 
 @app.route('/api/login', methods=['POST'])
 def login():
@@ -405,71 +414,59 @@ def logout():
 
 @app.route('/api/request_password_reset', methods=['POST'])
 def request_password_reset():
-    data = request.get_json(silent=True)
-    if not data or not data.get("username"):
-        return jsonify({"message": "Username required"}), 400
+    data = request.get_json()
+    email = data.get("email")
 
-    username = data["username"]
-    user = User.query.filter_by(username=username).first()
+    if not email:
+        return jsonify({"message": "Email required"}), 400
 
-    # Do NOT reveal whether user exists (security best practice)
+    user = User.query.filter_by(username=email).first()
     if not user:
-        return jsonify({"message": "If the username exists, a reset link will be provided."}), 200
+        return jsonify({"message": "If account exists, email has been sent"}), 200
 
-    # Create temporary reset token (valid 15 min)
-    reset_token = jwt.encode(
-        {
-            "user_id": user.id,
-            "type": "password_reset",
-            "exp": datetime.datetime.utcnow() + datetime.timedelta(minutes=15)
-        },
+    # create token
+    token = jwt.encode(
+        {"user_id": user.id, "exp": datetime.datetime.utcnow() + datetime.timedelta(minutes=15)},
         app.config["SECRET_KEY"],
         algorithm="HS256"
     )
 
-    # For now we return the token directly (since no email system)
-    # In the future, email this to the user instead.
-    return jsonify({
-        "message": "Password reset token generated.",
-        "reset_token": reset_token
-    }), 200
+    # send email
+    try:
+        send_password_reset_email(email, token)
+    except Exception as e:
+        print(e)
+        return jsonify({"message": "Error sending email"}), 500
+
+    return jsonify({"message": "Password reset email sent"}), 200
 
 @app.route('/api/reset_password', methods=['POST'])
 def reset_password():
-    data = request.get_json(silent=True)
-    if not data:
-        return jsonify({"message": "Invalid JSON"}), 400
-
+    data = request.get_json()
     token = data.get("token")
-    new_password = data.get("new_password")
+    new_password = data.get("password")
 
     if not token or not new_password:
-        return jsonify({"message": "Token and new password required"}), 400
+        return jsonify({"message": "Missing token or password"}), 400
 
     try:
         payload = jwt.decode(
             token,
-            app.config["SECRET_KEY"],
-            algorithms=["HS256"]
+            app.config['SECRET_KEY'],
+            algorithms=['HS256']
         )
-
-        if payload.get("type") != "password_reset":
-            return jsonify({"message": "Invalid reset token"}), 400
-
-        user = User.query.get(payload["user_id"])
-        if not user:
-            return jsonify({"message": "User not found"}), 404
-
-        user.set_password(new_password)
-        db.session.commit()
-
-        return jsonify({"message": "Password successfully reset"}), 200
+        user_id = payload["user_id"]
 
     except jwt.ExpiredSignatureError:
-        return jsonify({"message": "Reset token expired"}), 400
-    except jwt.InvalidTokenError:
-        return jsonify({"message": "Invalid reset token"}), 400
+        return jsonify({"message": "Token expired"}), 400
+    except Exception:
+        return jsonify({"message": "Invalid token"}), 400
 
+    user = User.query.get(user_id)
+    user.set_password(new_password)
+    db.session.commit()
+
+    return jsonify({"message": "Password changed"}), 200
 
 
 @app.route('/api/refresh', methods=['POST'])
