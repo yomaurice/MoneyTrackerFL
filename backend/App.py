@@ -61,7 +61,10 @@ def send_reset_email(to_email, reset_link):
             "from": "MoneyTracker <onboarding@resend.dev>",
             "to": [to_email],
             "subject": "Reset your password",
-            "html": f"<p>Click here to reset your password:</p><a href='{reset_link}'>{reset_link}</a>"
+            "html": f"""<p>You requested a password reset.</p>
+                    <p>Click the link below to reset your password:</p>
+                    <p><a href="{reset_link}">Reset Password</a></p>
+                    <p>If you did not request this, ignore this email.</p>"""
         }
 
         email = resend.Emails.send(params)
@@ -439,9 +442,14 @@ def request_password_reset():
     user.reset_token_expiration = datetime.datetime.utcnow() + datetime.timedelta(minutes=15)
     db.session.commit()
 
+    FRONTEND_URL = "https://money-tracker1.vercel.app"
+    reset_link = f"{FRONTEND_URL}/reset-password?token={token}"
+
+    # or your real custom domain when ready
+
     # Send email to the user's registered email
     try:
-        send_reset_email(user.email, token)
+        send_reset_email(user.email, reset_link)
     except Exception as e:
         print("EMAIL ERROR:", e)
         return jsonify({"message": "Error sending email"}), 500
