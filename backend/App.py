@@ -416,45 +416,28 @@ def request_password_reset():
     data = request.get_json()
     username = data.get("username")
 
-    # consistent message for security
-    generic_msg = {"message": "If account exists, email has been sent"}
-
     if not username:
         return jsonify({"message": "Username required"}), 400
 
-    # find user
     user = User.query.filter_by(username=username).first()
 
-    # If user doesn't exist → still return generic message
     if not user:
-        return jsonify(generic_msg), 200
+        # Tell frontend "user does not exist"
+        return jsonify({"message": "User not found"}), 404
 
-    # Create reset token
+    # User exists → create token
     token = jwt.encode(
-        {
-            "user_id": user.id,
-            "exp": datetime.datetime.utcnow() + datetime.timedelta(minutes=15)
-        },
+        {"user_id": user.id, "exp": datetime.datetime.utcnow() + datetime.timedelta(minutes=15)},
         app.config["SECRET_KEY"],
         algorithm="HS256"
     )
-    user.reset_token = token
-    user.reset_token_expiration = datetime.datetime.utcnow() + datetime.timedelta(minutes=15)
-    db.session.commit()
 
-    FRONTEND_URL = "https://money-tracker1-git-addpasswordreset-yonamaur-7820s-projects.vercel.app"
+    FRONTEND_URL = os.getenv("FRONTEND_URL")
     reset_link = f"{FRONTEND_URL}/reset-password?token={token}"
 
-    # or your real custom domain when ready
+    send_reset_email(user.email, reset_link)
 
-    # Send email to the user's registered email
-    try:
-        send_reset_email(user.email, reset_link)
-    except Exception as e:
-        print("EMAIL ERROR:", e)
-        return jsonify({"message": "Error sending email"}), 500
-
-    return jsonify(generic_msg), 200
+    return jsonify({"message": "Email sent"}), 200
 
 
 @app.route('/api/reset_password', methods=['POST'])
