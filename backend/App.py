@@ -432,7 +432,7 @@ def request_password_reset():
         algorithm="HS256"
     )
 
-    FRONTEND_URL = os.getenv("https://money-tracker1-git-addpasswordreset-yonamaur-7820s-projects.vercel.app")
+    FRONTEND_URL = "https://money-tracker1-git-addpasswordreset-yonamaur-7820s-projects.vercel.app"
     reset_link = f"{FRONTEND_URL}/reset-password?token={token}"
 
     send_reset_email(user.email, reset_link)
