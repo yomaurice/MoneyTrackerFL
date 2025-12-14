@@ -13,7 +13,7 @@ import logging
 import jwt
 from functools import wraps
 import resend
-
+import re
 RESET_TOKEN_EXPIRE_MIN = 20
 
 
@@ -42,7 +42,7 @@ CORS(app,
          "https://money-tracker1.vercel.app",
          "https://moneytrackerfl.onrender.com",
          "https://trackex.store",
-         r"https://.*\.vercel\.app"
+         re.compile(r"https://.*\.vercel\.app")
      ]}},
      methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
      allow_headers=["Content-Type", "Authorization"]
