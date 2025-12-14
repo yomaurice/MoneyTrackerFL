@@ -36,16 +36,19 @@ print("DATABASE_URL:", os.environ.get("DATABASE_URL"))
 db.init_app(app)
 # CORS(app, supports_credentials=True, origins=["http://localhost:3000"])
 # CORS(app, supports_credentials=True, resources={r"/api/*": {"origins": "http://localhost:3000"}}, methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
-CORS(app,
-     supports_credentials=True,
-     origins= [
-         "https://money-tracker1.vercel.app",
-         "https://moneytrackerfl.onrender.com",
-         "https://trackex.store",
-         re.compile(r"https://.*\.vercel\.app")
-     ],
-     methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-     allow_headers=["Content-Type", "Authorization"]
+CORS(
+    app,
+    supports_credentials=True,
+    origins=[
+        "https://money-tracker1.vercel.app",
+        "https://moneytrackerfl.onrender.com",
+        "https://trackex.store",
+        re.compile(r"https://.*\.vercel\.app"),
+        "http://localhost:3000",
+    ],
+    methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization"],
+    expose_headers=["Content-Type", "Authorization"],
 )
 
 logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
@@ -121,6 +124,14 @@ def generate_token(user_id):
 
 from flask import g
 
+@app.route("/")
+def index():
+    return "OK", 200
+
+@app.after_request
+def apply_cors(response):
+    response.headers["Access-Control-Allow-Credentials"] = "true"
+    return response
 def login_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
