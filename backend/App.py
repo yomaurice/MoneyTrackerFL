@@ -132,6 +132,15 @@ def index():
 def apply_cors(response):
     response.headers["Access-Control-Allow-Credentials"] = "true"
     return response
+
+@app.route('/api/<path:path>', methods=['OPTIONS'])
+def options_handler(path):
+    response = app.make_default_options_response()
+    response.headers['Access-Control-Allow-Origin'] = request.headers.get('Origin')
+    response.headers['Access-Control-Allow-Credentials'] = 'true'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
+    response.headers['Access-Control-Allow-Methods'] = 'GET,POST,PUT,DELETE,OPTIONS'
+    return response
 def login_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
