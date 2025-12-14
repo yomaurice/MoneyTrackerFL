@@ -38,12 +38,12 @@ db.init_app(app)
 # CORS(app, supports_credentials=True, resources={r"/api/*": {"origins": "http://localhost:3000"}}, methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
 CORS(app,
      supports_credentials=True,
-     resources={r"/*": {"origins": [
+     origins= [
          "https://money-tracker1.vercel.app",
          "https://moneytrackerfl.onrender.com",
          "https://trackex.store",
          re.compile(r"https://.*\.vercel\.app")
-     ]}},
+     ],
      methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
      allow_headers=["Content-Type", "Authorization"]
 )
