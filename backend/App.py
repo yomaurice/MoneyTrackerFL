@@ -45,7 +45,7 @@ CORS(
                 "https://money-tracker1.vercel.app",
                 "https://moneytrackerfl.onrender.com",
                 "https://trackex.store",
-                "https://money-tracker1-git-multidomainsupport-yonamaur-7820s-projects.vercel.app/",
+                "https://money-tracker1-git-multidomainsupport-yonamaur-7820s-projects.vercel.app",
                 "http://localhost:3000"
             ]
         }
