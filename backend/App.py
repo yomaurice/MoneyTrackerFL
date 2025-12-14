@@ -556,8 +556,8 @@ def handle_exception(e):
     logging.error(traceback.format_exc())
     return jsonify({"error": str(e)}), 500
 
-if __name__ == '__main__':
-    print("Registered routes:")
-    for rule in app.url_map.iter_rules():
-        print(rule)
-    app.run(debug=True)
+# if __name__ == '__main__':
+#     print("Registered routes:")
+#     for rule in app.url_map.iter_rules():
+#         print(rule)
+#     app.run(debug=True)
