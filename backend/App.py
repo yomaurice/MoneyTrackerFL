@@ -35,23 +35,34 @@ print("DATABASE_URL:", os.environ.get("DATABASE_URL"))
 
 db.init_app(app)
 # CORS(app, supports_credentials=True, origins=["http://localhost:3000"])
-# CORS(app, supports_credentials=True, resources={r"/api/*": {"origins": "http://localhost:3000"}}, methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
+# # CORS(app, supports_credentials=True, resources={r"/api/*": {"origins": "http://localhost:3000"}}, methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
+# CORS(
+#     app,
+#     supports_credentials=True,
+#     resources={
+#         r"/*": {
+#             "origins": [
+#                 "https://money-tracker1.vercel.app",
+#                 "https://moneytrackerfl.onrender.com",
+#                 "https://trackex.store",
+#                 "https://money-tracker1-git-multidomainsupport-yonamaur-7820s-projects.vercel.app",
+#                 "http://localhost:3000"
+#             ]
+#         }
+#     },
+#     methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+#     allow_headers=["Content-Type", "Authorization"]
+# )
 CORS(
     app,
     supports_credentials=True,
-    resources={
-        r"/*": {
-            "origins": [
-                "https://money-tracker1.vercel.app",
-                "https://moneytrackerfl.onrender.com",
-                "https://trackex.store",
-                "https://money-tracker1-git-multidomainsupport-yonamaur-7820s-projects.vercel.app",
-                "http://localhost:3000"
-            ]
-        }
-    },
-    methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allow_headers=["Content-Type", "Authorization"]
+    origins=[
+        "https://money-tracker1.vercel.app",
+        "https://trackex.store",
+        "https://moneytrackerfl.onrender.com",
+        re.compile(r"^https:\/\/.*\.vercel\.app$"),
+        "http://localhost:3000"
+    ],
 )
 
 logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
