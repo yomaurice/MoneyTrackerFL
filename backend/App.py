@@ -366,31 +366,45 @@ def signup():
 
 @app.route('/api/login', methods=['POST'])
 def login():
+    print('--- /api/login ---')
+
     data = request.get_json(silent=True)
+    print('login: raw json =', data)
+
     if not data:
+        print('login: ❌ invalid JSON body')
         return jsonify({'message': 'Invalid JSON body'}), 400
 
     username = data.get('username')
     password = data.get('password')
 
+    print('login: username =', username)
+
     user = User.query.filter_by(username=username).first()
+    print('login: user found =', bool(user))
 
     if not user or not user.check_password(password):
+        print('login: ❌ invalid credentials')
         return jsonify({'message': 'Invalid credentials'}), 401
 
     access_token = generate_access_token(user.id)
     refresh_token = generate_refresh_token(user.id)
 
+    print('login: generated access_token (len) =', len(access_token))
+    print('login: generated refresh_token (len) =', len(refresh_token))
+
     resp = jsonify({'message': 'Login successful'})
+
     resp.set_cookie(
         'access_token',
         access_token,
         httponly=True,
         secure=True,
-        samesite='None',  # IMPORTANT for Vercel ↔ Render
+        samesite='None',
         max_age=15 * 60,
         path='/'
     )
+
     resp.set_cookie(
         'refresh_token',
         refresh_token,
@@ -401,14 +415,30 @@ def login():
         path='/'
     )
 
+    print('login: response Set-Cookie headers =')
+    for h in resp.headers.getlist('Set-Cookie'):
+        print('   ', h)
+
+    print('login: ✅ returning 200')
     return resp, 200
+
 
 @app.route('/api/logout', methods=['POST'])
 def logout():
+    print('--- /api/logout ---')
+    print('logout: cookies before delete =', request.cookies)
+
     resp = jsonify({'message': 'Logged out'})
     resp.delete_cookie('access_token')
     resp.delete_cookie('refresh_token')
+
+    print('logout: Set-Cookie headers =')
+    for h in resp.headers.getlist('Set-Cookie'):
+        print('   ', h)
+
+    print('logout: ✅ returning')
     return resp
+
 
 @app.route('/api/request_password_reset', methods=['POST'])
 def request_password_reset():
@@ -517,13 +547,27 @@ def check_username():
     return jsonify({'available': not taken})
 
 @app.route('/api/me', methods=['GET'])
+@app.route('/api/me', methods=['GET'])
 @login_required
 def me():
+    print('--- /api/me ---')
+
+    print('me: cookies received =', request.cookies)
+    print('me: g.user_id =', getattr(g, 'user_id', None))
+
     user = User.query.get(g.user_id)
+
+    if not user:
+        print('me: ❌ user not found in DB')
+        return jsonify({'message': 'User not found'}), 404
+
+    print('me: ✅ returning user', user.username)
+
     return jsonify({
         'id': user.id,
         'username': user.username
     })
+
 
 # endpoint of to keep backend alive and reactive
 @app.route("/api/health")
