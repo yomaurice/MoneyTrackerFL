@@ -355,9 +355,6 @@ def signup():
     if User.query.filter_by(username=username).first():
         return jsonify({'message': 'Username already exists'}), 400
 
-    if User.query.filter_by(email=email).first():
-        return jsonify({'message': 'Email already exists'}), 400
-
     user = User(username=username, email=email)
     user.set_password(password)
 
