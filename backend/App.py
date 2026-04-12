@@ -14,10 +14,6 @@ import jwt
 from functools import wraps
 import resend
 import re
-RESET_TOKEN_EXPIRE_MIN = 20
-
-
-
 load_dotenv()
 app = Flask(__name__)
 
@@ -33,8 +29,6 @@ app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {
     "pool_recycle": 300,
 }
 
-
-print("DATABASE_URL:", os.environ.get("DATABASE_URL"))
 
 db.init_app(app)
 
@@ -70,10 +64,10 @@ def send_reset_email(to_email, reset_link):
         }
 
         email = resend.Emails.send(params)
-        print("Email sent:", email)
+        logging.info("Email sent: %s", email)
         return True
     except Exception as e:
-        print("Resend ERROR:", e)
+        logging.error("Resend error: %s", e)
         return False
 
 def generate_access_token(user_id):
@@ -104,22 +98,6 @@ def decode_token(token, expected_type):
         return None
     except jwt.InvalidTokenError:
         return None
-
-def generate_token(user_id):
-    payload = {
-        'user_id': user_id,
-        'exp': datetime.datetime.utcnow() + datetime.timedelta(days=1)
-    }
-    return jwt.encode(payload, app.config['SECRET_KEY'], algorithm='HS256')
-
-# def decode_token(token):
-#     try:
-#         payload = jwt.decode(token, app.config['SECRET_KEY'], algorithms=['HS256'])
-#         return payload['user_id']
-#     except jwt.ExpiredSignatureError:
-#         return None
-#     except jwt.InvalidTokenError:
-#         return None
 
 from flask import g
 
@@ -366,32 +344,21 @@ def signup():
 
 @app.route('/api/login', methods=['POST'])
 def login():
-    print('--- /api/login ---')
-
     data = request.get_json(silent=True)
-    print('login: raw json =', data)
 
     if not data:
-        print('login: ❌ invalid JSON body')
         return jsonify({'message': 'Invalid JSON body'}), 400
 
     username = data.get('username')
     password = data.get('password')
 
-    print('login: username =', username)
-
     user = User.query.filter_by(username=username).first()
-    print('login: user found =', bool(user))
 
     if not user or not user.check_password(password):
-        print('login: ❌ invalid credentials')
         return jsonify({'message': 'Invalid credentials'}), 401
 
     access_token = generate_access_token(user.id)
     refresh_token = generate_refresh_token(user.id)
-
-    print('login: generated access_token (len) =', len(access_token))
-    print('login: generated refresh_token (len) =', len(refresh_token))
 
     resp = jsonify({'message': 'Login successful'})
 
@@ -415,28 +382,14 @@ def login():
         path='/'
     )
 
-    print('login: response Set-Cookie headers =')
-    for h in resp.headers.getlist('Set-Cookie'):
-        print('   ', h)
-
-    print('login: ✅ returning 200')
     return resp, 200
 
 
 @app.route('/api/logout', methods=['POST'])
 def logout():
-    print('--- /api/logout ---')
-    print('logout: cookies before delete =', request.cookies)
-
     resp = jsonify({'message': 'Logged out'})
     resp.delete_cookie('access_token')
     resp.delete_cookie('refresh_token')
-
-    print('logout: Set-Cookie headers =')
-    for h in resp.headers.getlist('Set-Cookie'):
-        print('   ', h)
-
-    print('logout: ✅ returning')
     return resp
 
 
@@ -547,21 +500,12 @@ def check_username():
     return jsonify({'available': not taken})
 
 @app.route('/api/me', methods=['GET'])
-@app.route('/api/me', methods=['GET'])
 @login_required
 def me():
-    print('--- /api/me ---')
-
-    print('me: cookies received =', request.cookies)
-    print('me: g.user_id =', getattr(g, 'user_id', None))
-
     user = User.query.get(g.user_id)
 
     if not user:
-        print('me: ❌ user not found in DB')
         return jsonify({'message': 'User not found'}), 404
-
-    print('me: ✅ returning user', user.username)
 
     return jsonify({
         'id': user.id,
@@ -579,8 +523,3 @@ def handle_exception(e):
     logging.error(traceback.format_exc())
     return jsonify({"error": str(e)}), 500
 
-# if __name__ == '__main__':
-#     print("Registered routes:")
-#     for rule in app.url_map.iter_rules():
-#         print(rule)
-#     app.run(debug=True)
