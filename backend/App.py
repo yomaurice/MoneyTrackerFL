@@ -156,7 +156,9 @@ def add_transaction():
             amount=float(data['amount']),
             description=data.get('description', ''),
             date=transaction_date.date(),
-            user_id=user_id
+            user_id=user_id,
+            currency=data.get('currency', 'ILS'),
+            exchange_rate=float(data.get('exchange_rate', 1.0))
         )
         db.session.add(tx)
         db.session.flush()
@@ -220,6 +222,8 @@ def get_analytics():
             'type': tx.type,
             'category': tx.category,
             'amount': tx.amount,
+            'currency': tx.currency or 'ILS',
+            'exchange_rate': tx.exchange_rate or 1.0,
             'description': tx.description,
             'date': tx.date.strftime('%Y-%m-%d')
         })
@@ -241,6 +245,8 @@ def get_transactions():
         'type': tx.type,
         'category': tx.category,
         'amount': tx.amount,
+        'currency': tx.currency or 'ILS',
+        'exchange_rate': tx.exchange_rate or 1.0,
         'description': tx.description,
         'date': tx.date.strftime('%Y-%m-%d'),
         'created_at': tx.created_at.strftime('%Y-%m-%d %H:%M:%S')
@@ -262,6 +268,8 @@ def update_transaction(transaction_id):
     tx.description = data.get('description', '')
     tx.date = datetime.datetime.strptime(data['date'], '%Y-%m-%d').date()
     tx.user_id = user_id
+    tx.currency = data.get('currency', tx.currency or 'ILS')
+    tx.exchange_rate = float(data.get('exchange_rate', tx.exchange_rate or 1.0))
 
     db.session.commit()
     return jsonify({'message': 'Transaction updated successfully'})
@@ -512,6 +520,26 @@ def me():
         'id': user.id,
         'username': user.username
     })
+
+
+@app.route('/api/exchange-rate', methods=['GET'])
+@login_required
+def get_exchange_rate():
+    import requests as req
+    from_currency = request.args.get('from', 'USD').upper()
+    to_currency = request.args.get('to', 'ILS').upper()
+    if from_currency == to_currency:
+        return jsonify({'rate': 1.0})
+    try:
+        r = req.get(f'https://open.er-api.com/v6/latest/{from_currency}', timeout=5)
+        data = r.json()
+        rate = data['rates'].get(to_currency)
+        if rate is None:
+            return jsonify({'error': 'Currency not found'}), 400
+        return jsonify({'rate': rate})
+    except Exception as e:
+        logging.error('Exchange rate fetch failed: %s', e)
+        return jsonify({'error': 'Failed to fetch exchange rate'}), 502
 
 
 # endpoint of to keep backend alive and reactive

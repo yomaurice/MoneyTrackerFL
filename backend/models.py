@@ -32,3 +32,5 @@ class Transaction(db.Model):
     description = db.Column(db.String)
     date = db.Column(db.Date, nullable=False)
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    currency = db.Column(db.String(10), nullable=False, server_default='ILS')
+    exchange_rate = db.Column(db.Float, nullable=False, server_default='1.0')
