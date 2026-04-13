@@ -21,9 +21,10 @@ app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "dev-secret-key")
 app.config['SQLALCHEMY_DATABASE_URI'] = os.environ["DATABASE_URL"]
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+_is_local = os.environ.get("DATABASE_URL", "").startswith("postgresql://postgres@localhost") or "localhost" in os.environ.get("DATABASE_URL", "")
 app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {
     "connect_args": {
-        "sslmode": "require"
+        "sslmode": "disable" if _is_local else "require"
     },
     "pool_pre_ping": True,
     "pool_recycle": 300,
@@ -522,4 +523,7 @@ def health():
 def handle_exception(e):
     logging.error(traceback.format_exc())
     return jsonify({"error": str(e)}), 500
+
+if __name__ == '__main__':
+    app.run(debug=True, port=5000)
 
