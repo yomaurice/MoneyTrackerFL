@@ -39,6 +39,7 @@ CORS(
     origins=[
         "https://money-tracker1.vercel.app",
         "https://trackex.store",
+        "https://www.trackex.store",
         "https://moneytrackerfl.onrender.com",
         re.compile(r"^https:\/\/.*\.vercel\.app$"),
         "http://localhost:3000"
