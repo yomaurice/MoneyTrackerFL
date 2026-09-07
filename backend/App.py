@@ -78,9 +78,11 @@ CORS(
 from auth import login_required, decode_token  # noqa: E402
 from routes.tokens import tokens_bp  # noqa: E402
 from routes.transactions_bulk import transactions_bulk_bp  # noqa: E402
+from routes.review import review_bp  # noqa: E402
 
 app.register_blueprint(tokens_bp)
 app.register_blueprint(transactions_bulk_bp)
+app.register_blueprint(review_bp)
 
 resend.api_key = os.getenv("RESEND_API_KEY")
 

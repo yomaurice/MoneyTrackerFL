@@ -68,7 +68,7 @@ def make_user(app):
 
     from models import (
         db, User, RefreshToken, IngestToken, StagedTransaction,
-        ImportBatch, SourceProfile, MerchantRule, Transaction,
+        ImportBatch, SourceProfile, MerchantRule, Transaction, Category,
     )
 
     with app.app_context():
@@ -80,6 +80,11 @@ def make_user(app):
             IngestToken.query.filter_by(user_id=uid).delete()
             RefreshToken.query.filter_by(user_id=uid).delete()
             Transaction.query.filter_by(user_id=uid).delete()
+            # Must be cleaned per test: the deployed schema has UNIQUE(name)
+            # on category *globally* rather than per user, so a leftover row
+            # blocks the next test -- and, less amusingly, blocks a second
+            # real user from ever using a category name the first one took.
+            Category.query.filter_by(user_id=uid).delete()
             User.query.filter_by(id=uid).delete()
         db.session.commit()
 
