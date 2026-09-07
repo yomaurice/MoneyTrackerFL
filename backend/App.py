@@ -418,11 +418,24 @@ def add_category():
 @login_required
 def delete_category(name):
     user_id = g.user_id
-    category = Category.query.filter_by(name=name, user_id=user_id).first()
+
+    # Matching on name alone used to pick arbitrarily between an income and an
+    # expense category sharing a name. That was already wrong, and scoping
+    # uniqueness to (user, name, type) makes the collision reachable rather
+    # than theoretical, so `type` is honoured when the caller supplies it.
+    type_ = request.args.get('type')
+
+    query = Category.query.filter_by(name=name, user_id=user_id)
+    if type_:
+        query = query.filter_by(type=type_)
+
+    category = query.first()
     if category:
         db.session.delete(category)
         db.session.commit()
-    return jsonify({'message': 'Category deleted'})
+        return jsonify({'message': 'Category deleted', 'type': category.type})
+
+    return jsonify({'message': 'Category not found'}), 404
 
 @app.route("/years", methods=["GET"])
 def get_years_with_data():

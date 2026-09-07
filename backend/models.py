@@ -27,6 +27,15 @@ class Category(db.Model):
     type = db.Column(db.String)
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
 
+    __table_args__ = (
+        # Scoped to the owner. The deployed database had UNIQUE (name) with no
+        # user_id in it, which meant the first account to create "Groceries"
+        # took that name away from everyone else. Type is part of the key so an
+        # income and an expense category may share a name.
+        db.UniqueConstraint('user_id', 'name', 'type',
+                            name='uq_category_user_name_type'),
+    )
+
 class Transaction(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     type = db.Column(db.String, nullable=False)  # 'income' or 'expense'
