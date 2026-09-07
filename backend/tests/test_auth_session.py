@@ -22,24 +22,6 @@ USERNAME = '__pytest_session_user__'
 PASSWORD = 'pytest-pass-12345'
 
 
-@pytest.fixture(scope='module')
-def app():
-    try:
-        import App as appmod
-    except Exception as exc:  # pragma: no cover - environment guard
-        pytest.skip(f'backend app could not be imported: {exc}')
-
-    from models import db
-
-    with appmod.app.app_context():
-        try:
-            db.session.execute(db.text('select 1'))
-        except Exception as exc:  # pragma: no cover - environment guard
-            pytest.skip(f'no database reachable: {exc}')
-
-    return appmod.app
-
-
 @pytest.fixture
 def user(app):
     """A throwaway user, removed with its tokens afterwards."""
