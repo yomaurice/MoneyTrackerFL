@@ -1,0 +1,4 @@
+# Local development and test dependencies.
+# Kept out of requirements.txt so the deployed image stays small.
+-r requirements.txt
+pytest==9.1.1

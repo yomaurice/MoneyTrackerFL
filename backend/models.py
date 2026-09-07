@@ -1,3 +1,6 @@
+import datetime
+import hashlib
+
 from werkzeug.security import generate_password_hash, check_password_hash
 from flask_sqlalchemy import SQLAlchemy
 
@@ -34,3 +37,42 @@ class Transaction(db.Model):
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
     currency = db.Column(db.String(10), nullable=False, server_default='ILS')
     exchange_rate = db.Column(db.Float, nullable=False, server_default='1.0')
+    created_at = db.Column(
+        db.DateTime, nullable=False, server_default=db.func.now()
+    )
+
+
+REFRESH_TOKEN_DAYS = 90
+
+
+class RefreshToken(db.Model):
+    """One row per issued refresh token, so sessions can be rotated and revoked.
+
+    A stateless JWT cannot be withdrawn once issued. Storing a hash of each
+    token buys two things: a logout that genuinely ends the session, and reuse
+    detection -- a token presented after it has already been rotated means a
+    copy is circulating, so the whole family is revoked.
+    """
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(
+        db.Integer, db.ForeignKey('user.id'), nullable=False, index=True
+    )
+    token_hash = db.Column(db.String(64), nullable=False, unique=True, index=True)
+    issued_at = db.Column(db.DateTime, nullable=False, server_default=db.func.now())
+    expires_at = db.Column(db.DateTime, nullable=False)
+    rotated_to = db.Column(db.String(64), nullable=True)
+    revoked_at = db.Column(db.DateTime, nullable=True)
+    user_agent = db.Column(db.String(300), nullable=True)
+
+    @staticmethod
+    def hash_token(raw_token):
+        return hashlib.sha256(raw_token.encode('utf-8')).hexdigest()
+
+    @property
+    def is_active(self):
+        return (
+            self.revoked_at is None
+            and self.rotated_to is None
+            and self.expires_at > datetime.datetime.utcnow()
+        )
