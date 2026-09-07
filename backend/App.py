@@ -79,10 +79,18 @@ from auth import login_required, decode_token  # noqa: E402
 from routes.tokens import tokens_bp  # noqa: E402
 from routes.transactions_bulk import transactions_bulk_bp  # noqa: E402
 from routes.review import review_bp  # noqa: E402
+from routes.source_profiles import source_profiles_bp  # noqa: E402
+from routes.imports import imports_bp  # noqa: E402
 
 app.register_blueprint(tokens_bp)
 app.register_blueprint(transactions_bulk_bp)
 app.register_blueprint(review_bp)
+app.register_blueprint(source_profiles_bp)
+app.register_blueprint(imports_bp)
+
+# Statements are small. Flask rejects anything larger before it reaches a view,
+# so an oversized upload cannot occupy memory on the 512MB free tier.
+app.config['MAX_CONTENT_LENGTH'] = 8 * 1024 * 1024
 
 resend.api_key = os.getenv("RESEND_API_KEY")
 
@@ -723,8 +731,17 @@ def health():
 
 @app.errorhandler(Exception)
 def handle_exception(e):
+    # Logged in full, returned as a generic message. Returning str(e) leaked
+    # SQL, constraint names and parameter values to the client -- and now that
+    # statements are parsed here, an exception can carry the contents of a bank
+    # export. HTTP errors keep their own status and description.
+    from werkzeug.exceptions import HTTPException
+
+    if isinstance(e, HTTPException):
+        return jsonify({'message': e.description}), e.code
+
     logging.error(traceback.format_exc())
-    return jsonify({"error": str(e)}), 500
+    return jsonify({'error': 'Something went wrong on the server.'}), 500
 
 if __name__ == '__main__':
     app.run(debug=True, port=5000)

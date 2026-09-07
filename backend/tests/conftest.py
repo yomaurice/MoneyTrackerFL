@@ -45,6 +45,15 @@ def _mount_token_probe(flask_app):
     def _token_probe():
         return jsonify({'user_id': g.user_id})
 
+    @flask_app.route('/api/_boom', methods=['GET'])
+    def _boom():
+        # Raises with a message shaped like the sensitive detail a real failure
+        # would carry, so the error-handler test can assert none of it escapes.
+        raise RuntimeError(
+            'DETAIL: Key (id)=(42) referenced from table "staged_transaction" '
+            'merchant=שופרסל דיל amount=52.90'
+        )
+
 
 @pytest.fixture
 def make_user(app):
