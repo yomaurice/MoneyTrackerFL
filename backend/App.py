@@ -38,8 +38,6 @@ CORS(
     supports_credentials=True,
     origins=[
         "https://money-tracker1.vercel.app",
-        "https://trackex.store",
-        "https://www.trackex.store",
         "https://moneytrackerfl.onrender.com",
         re.compile(r"^https:\/\/.*\.vercel\.app$"),
         "http://localhost:3000"
@@ -377,7 +375,7 @@ def login():
         access_token,
         httponly=True,
         secure=True,
-        samesite='None',
+        samesite='Lax',
         max_age=15 * 60,
         path='/'
     )
@@ -387,7 +385,7 @@ def login():
         refresh_token,
         httponly=True,
         secure=True,
-        samesite='None',
+        samesite='Lax',
         max_age=14 * 24 * 60 * 60,
         path='/'
     )
@@ -398,8 +396,8 @@ def login():
 @app.route('/api/logout', methods=['POST'])
 def logout():
     resp = jsonify({'message': 'Logged out'})
-    resp.delete_cookie('access_token')
-    resp.delete_cookie('refresh_token')
+    resp.delete_cookie('access_token', path='/', secure=True, samesite='Lax')
+    resp.delete_cookie('refresh_token', path='/', secure=True, samesite='Lax')
     return resp
 
 
@@ -492,7 +490,7 @@ def refresh():
         new_access,
         httponly=True,
         secure=True,
-        samesite='None',
+        samesite='Lax',
         path='/',
         max_age=15 * 60
     )
