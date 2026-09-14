@@ -15,3 +15,36 @@ venv/
 
 # Env
 .env
+
+# --- migration 2026-09 (old PC) ---
+.env
+.env.*
+!.env.example
+*.pem
+*.pfx
+*.key
+*.p12
+credentials*.json
+client_secret*.json
+token*.json
+token.pickle
+*.sqlite
+*.sqlite3
+db.sqlite3
+venv/
+.venv/
+env/
+node_modules/
+__pycache__/
+*.pyc
+.idea/
+.vscode/
+.claude/
+.pytest_cache/
+dist/
+build/
+*.egg-info/
+*.stackdump
+.next/
+.vercel/
+certs/
