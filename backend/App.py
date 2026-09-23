@@ -1,7 +1,7 @@
 import sys
 import traceback
 
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, g
 from flask_cors import CORS
 import datetime
 from dateutil.relativedelta import relativedelta
@@ -71,6 +71,26 @@ CORS(
 # Schema is owned by Alembic (see backend/migrations). db.create_all() used to
 # live here, which is why new columns never reached the deployed database.
 # The Procfile now runs `flask db upgrade` before gunicorn starts.
+
+# Imported after the app and db exist. `login_required` and `token_required`
+# now live in auth.py; existing routes below stay in this module deliberately,
+# to keep the blast radius of new work small.
+from auth import login_required, decode_token  # noqa: E402
+from routes.tokens import tokens_bp  # noqa: E402
+from routes.transactions_bulk import transactions_bulk_bp  # noqa: E402
+from routes.review import review_bp  # noqa: E402
+from routes.source_profiles import source_profiles_bp  # noqa: E402
+from routes.imports import imports_bp  # noqa: E402
+
+app.register_blueprint(tokens_bp)
+app.register_blueprint(transactions_bulk_bp)
+app.register_blueprint(review_bp)
+app.register_blueprint(source_profiles_bp)
+app.register_blueprint(imports_bp)
+
+# Statements are small. Flask rejects anything larger before it reaches a view,
+# so an oversized upload cannot occupy memory on the 512MB free tier.
+app.config['MAX_CONTENT_LENGTH'] = 8 * 1024 * 1024
 
 resend.api_key = os.getenv("RESEND_API_KEY")
 
@@ -201,35 +221,6 @@ def prune_refresh_tokens(user_id):
             ),
         ),
     ).delete(synchronize_session=False)
-
-
-def decode_token(token, expected_type):
-    try:
-        payload = jwt.decode(token, app.config['SECRET_KEY'], algorithms=['HS256'])
-        if payload.get('type') != expected_type:
-            return None
-        return payload['user_id']
-    except jwt.ExpiredSignatureError:
-        return None
-    except jwt.InvalidTokenError:
-        return None
-
-from flask import g
-
-def login_required(f):
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        token = request.cookies.get('access_token')
-        if not token:
-            return jsonify({'message': 'Unauthorized'}), 401
-
-        user_id = decode_token(token, 'access')
-        if not user_id:
-            return jsonify({'message': 'Access token expired'}), 401
-
-        g.user_id = user_id
-        return f(*args, **kwargs)
-    return decorated
 
 
 @app.route('/api/categories', methods=['GET'])
@@ -435,11 +426,24 @@ def add_category():
 @login_required
 def delete_category(name):
     user_id = g.user_id
-    category = Category.query.filter_by(name=name, user_id=user_id).first()
+
+    # Matching on name alone used to pick arbitrarily between an income and an
+    # expense category sharing a name. That was already wrong, and scoping
+    # uniqueness to (user, name, type) makes the collision reachable rather
+    # than theoretical, so `type` is honoured when the caller supplies it.
+    type_ = request.args.get('type')
+
+    query = Category.query.filter_by(name=name, user_id=user_id)
+    if type_:
+        query = query.filter_by(type=type_)
+
+    category = query.first()
     if category:
         db.session.delete(category)
         db.session.commit()
-    return jsonify({'message': 'Category deleted'})
+        return jsonify({'message': 'Category deleted', 'type': category.type})
+
+    return jsonify({'message': 'Category not found'}), 404
 
 @app.route("/years", methods=["GET"])
 def get_years_with_data():
@@ -727,8 +731,17 @@ def health():
 
 @app.errorhandler(Exception)
 def handle_exception(e):
+    # Logged in full, returned as a generic message. Returning str(e) leaked
+    # SQL, constraint names and parameter values to the client -- and now that
+    # statements are parsed here, an exception can carry the contents of a bank
+    # export. HTTP errors keep their own status and description.
+    from werkzeug.exceptions import HTTPException
+
+    if isinstance(e, HTTPException):
+        return jsonify({'message': e.description}), e.code
+
     logging.error(traceback.format_exc())
-    return jsonify({"error": str(e)}), 500
+    return jsonify({'error': 'Something went wrong on the server.'}), 500
 
 if __name__ == '__main__':
     app.run(debug=True, port=5000)
