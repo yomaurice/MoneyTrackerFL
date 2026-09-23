@@ -1,12 +1,14 @@
 Flask==2.3.3
 Flask-CORS==4.0.0
+Flask-Migrate==4.1.0
+alembic==1.19.2
 python-dateutil==2.8.2
 gunicorn
 flask_sqlalchemy==3.0.5
 psycopg2-binary
-dotenv
+python-dotenv
 pyjwt
-cd
+requests
 sendgrid==6.11.0
 python-http-client==3.3.7
 resend

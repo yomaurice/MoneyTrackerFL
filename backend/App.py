@@ -6,19 +6,42 @@ from flask_cors import CORS
 import datetime
 from dateutil.relativedelta import relativedelta
 from flask_sqlalchemy import SQLAlchemy
-from models import db, User, Transaction, Category
+from flask_migrate import Migrate
+from models import (
+    db,
+    User,
+    Transaction,
+    Category,
+    RefreshToken,
+    REFRESH_TOKEN_DAYS,
+)
 import os
 from dotenv import load_dotenv
 import logging
 import jwt
+import uuid
 from functools import wraps
 import resend
 import re
 load_dotenv()
+# Configured before anything else so startup warnings are not emitted through
+# logging's handler of last resort.
+logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
+
 app = Flask(__name__)
 
 # app.config['SECRET_KEY'] = 'your-secret-key'
 app.secret_key = os.environ.get("SECRET_KEY", "dev-secret-key")
+if app.secret_key == "dev-secret-key" or len(app.secret_key) < 32:
+    # Every access and refresh token is signed with this. A short or default
+    # key means anyone can mint a token for any user, so a deployment must set
+    # SECRET_KEY to at least 32 random bytes. Warned rather than fatal so an
+    # already-running deployment is not taken down by an upgrade; make it fatal
+    # once the environment is confirmed.
+    logging.error(
+        "SECRET_KEY is missing, default, or shorter than 32 bytes -- auth "
+        "tokens are forgeable. Set SECRET_KEY in the environment."
+    )
 app.config['SQLALCHEMY_DATABASE_URI'] = os.environ["DATABASE_URL"]
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 _is_local = os.environ.get("DATABASE_URL", "").startswith("postgresql://postgres@localhost") or "localhost" in os.environ.get("DATABASE_URL", "")
@@ -32,6 +55,7 @@ app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {
 
 
 db.init_app(app)
+migrate = Migrate(app, db)
 
 CORS(
     app,
@@ -44,10 +68,9 @@ CORS(
     ],
 )
 
-logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
-
-with app.app_context():
-    db.create_all()
+# Schema is owned by Alembic (see backend/migrations). db.create_all() used to
+# live here, which is why new columns never reached the deployed database.
+# The Procfile now runs `flask db upgrade` before gunicorn starts.
 
 resend.api_key = os.getenv("RESEND_API_KEY")
 
@@ -83,9 +106,101 @@ def generate_refresh_token(user_id):
     payload = {
         'user_id': user_id,
         'type': 'refresh',
-        'exp': datetime.datetime.utcnow() + datetime.timedelta(days=14)
+        'jti': uuid.uuid4().hex,
+        'exp': datetime.datetime.utcnow() + datetime.timedelta(
+            days=REFRESH_TOKEN_DAYS
+        )
     }
     return jwt.encode(payload, app.config['SECRET_KEY'], algorithm='HS256')
+
+
+ACCESS_TOKEN_SECONDS = 15 * 60
+REFRESH_TOKEN_SECONDS = REFRESH_TOKEN_DAYS * 24 * 60 * 60
+
+# How long after a refresh token is rotated a replay of it is still treated as
+# a race rather than as theft. See the reuse branch in /api/refresh.
+REFRESH_GRACE_SECONDS = 60
+
+# SameSite=Lax rather than None: every production API call is first-party via
+# the frontend's rewrite proxy, so Lax is not restricted by third-party cookie
+# policies, and it still survives the top-level navigation that opening the app
+# from a notification performs.
+_COOKIE_FLAGS = dict(httponly=True, secure=True, samesite='Lax', path='/')
+
+
+def set_auth_cookies(resp, access_token=None, refresh_token=None):
+    """Single place where auth cookie attributes are defined.
+
+    They previously lived inline in three routes and drifted apart, which is
+    the kind of thing that quietly breaks a session.
+    """
+    if access_token is not None:
+        resp.set_cookie(
+            'access_token', access_token,
+            max_age=ACCESS_TOKEN_SECONDS, **_COOKIE_FLAGS
+        )
+    if refresh_token is not None:
+        resp.set_cookie(
+            'refresh_token', refresh_token,
+            max_age=REFRESH_TOKEN_SECONDS, **_COOKIE_FLAGS
+        )
+    return resp
+
+
+def clear_auth_cookies(resp):
+    resp.delete_cookie('access_token', **_COOKIE_FLAGS)
+    resp.delete_cookie('refresh_token', **_COOKIE_FLAGS)
+    return resp
+
+
+def issue_refresh_token(user_id):
+    """Mint a refresh token and record its hash. Caller commits."""
+    token = generate_refresh_token(user_id)
+    now = datetime.datetime.utcnow()
+    record = RefreshToken(
+        user_id=user_id,
+        token_hash=RefreshToken.hash_token(token),
+        issued_at=now,
+        expires_at=now + datetime.timedelta(days=REFRESH_TOKEN_DAYS),
+        user_agent=(request.headers.get('User-Agent') or '')[:300] or None,
+    )
+    db.session.add(record)
+    return token, record
+
+
+def revoke_refresh_family(user_id):
+    """Revoke every live refresh token for a user. Caller commits."""
+    RefreshToken.query.filter(
+        RefreshToken.user_id == user_id,
+        RefreshToken.revoked_at.is_(None),
+    ).update(
+        {'revoked_at': datetime.datetime.utcnow()},
+        synchronize_session=False,
+    )
+
+
+def prune_refresh_tokens(user_id):
+    """Drop rows that can no longer authenticate anything. Caller commits.
+
+    Rotation means a row per refresh, and a rotated row is not an expired one,
+    so without this the table grows for the full 90-day window. Spent rows are
+    kept for a week first: that is the forensic window in which a replay is
+    still reported as reuse rather than merely as an unknown token.
+    """
+    now = datetime.datetime.utcnow()
+    RefreshToken.query.filter(
+        RefreshToken.user_id == user_id,
+        db.or_(
+            RefreshToken.expires_at < now - datetime.timedelta(days=30),
+            db.and_(
+                RefreshToken.issued_at < now - datetime.timedelta(days=7),
+                db.or_(
+                    RefreshToken.rotated_to.isnot(None),
+                    RefreshToken.revoked_at.isnot(None),
+                ),
+            ),
+        ),
+    ).delete(synchronize_session=False)
 
 
 def decode_token(token, expected_type):
@@ -238,7 +353,17 @@ def get_analytics():
 @login_required
 def get_transactions():
     user_id = g.user_id
-    transactions = Transaction.query.filter_by(user_id=user_id).order_by(Transaction.date.desc(), Transaction.created_at.desc()).limit(100).all()
+    transactions = (
+        Transaction.query
+        .filter_by(user_id=user_id)
+        .order_by(
+            Transaction.date.desc(),
+            Transaction.created_at.desc(),
+            Transaction.id.desc(),
+        )
+        .limit(100)
+        .all()
+    )
     return jsonify([{
         'id': tx.id,
         'type': tx.type,
@@ -366,38 +491,31 @@ def login():
         return jsonify({'message': 'Invalid credentials'}), 401
 
     access_token = generate_access_token(user.id)
-    refresh_token = generate_refresh_token(user.id)
+    refresh_token, _ = issue_refresh_token(user.id)
+    prune_refresh_tokens(user.id)
+    db.session.commit()
 
     resp = jsonify({'message': 'Login successful'})
-
-    resp.set_cookie(
-        'access_token',
-        access_token,
-        httponly=True,
-        secure=True,
-        samesite='Lax',
-        max_age=15 * 60,
-        path='/'
-    )
-
-    resp.set_cookie(
-        'refresh_token',
-        refresh_token,
-        httponly=True,
-        secure=True,
-        samesite='Lax',
-        max_age=14 * 24 * 60 * 60,
-        path='/'
-    )
+    set_auth_cookies(resp, access_token, refresh_token)
 
     return resp, 200
 
 
 @app.route('/api/logout', methods=['POST'])
 def logout():
+    # Revoke only the token presented here, so signing out on the phone does
+    # not end the session on the desktop.
+    token = request.cookies.get('refresh_token')
+    if token:
+        record = RefreshToken.query.filter_by(
+            token_hash=RefreshToken.hash_token(token)
+        ).first()
+        if record and record.revoked_at is None:
+            record.revoked_at = datetime.datetime.utcnow()
+            db.session.commit()
+
     resp = jsonify({'message': 'Logged out'})
-    resp.delete_cookie('access_token', path='/', secure=True, samesite='Lax')
-    resp.delete_cookie('refresh_token', path='/', secure=True, samesite='Lax')
+    clear_auth_cookies(resp)
     return resp
 
 
@@ -482,18 +600,79 @@ def refresh():
     except jwt.InvalidTokenError:
         return jsonify({'message': 'Invalid refresh token'}), 401
 
+    record = RefreshToken.query.filter_by(
+        token_hash=RefreshToken.hash_token(token)
+    ).first()
+
+    if record is None:
+        # A correctly signed token with no row is a session that was issued
+        # before rotation shipped. Adopt it once rather than logging everyone
+        # out on deploy. Only pre-rotation tokens qualify -- they have no
+        # `jti` -- so this path closes by itself once the old 14-day tokens
+        # expire, and an unknown token that *does* carry a jti is rejected.
+        if payload.get('jti') is not None:
+            resp = jsonify({'message': 'Unknown refresh token'})
+            clear_auth_cookies(resp)
+            return resp, 401
+    elif record.rotated_to is not None:
+        successor = RefreshToken.query.filter_by(
+            token_hash=record.rotated_to
+        ).first()
+        age = datetime.datetime.utcnow() - (
+            successor.issued_at if successor else record.issued_at
+        )
+
+        if (
+            successor is not None
+            and successor.is_active
+            and age <= datetime.timedelta(seconds=REFRESH_GRACE_SECONDS)
+        ):
+            # Benign replay, not theft. Two tabs opening at once, or a retry
+            # after a timeout, both present the same cookie: the first rotates
+            # it, the second arrives moments later still holding it. Punishing
+            # that would log the user out for using two tabs.
+            #
+            # The browser already holds the successor cookie from the winning
+            # request, so hand back only a fresh access token and leave the
+            # refresh cookie alone. The window is short and the successor must
+            # still be live, so a genuinely stolen token gets no useful reach.
+            resp = jsonify({'message': 'refreshed'})
+            set_auth_cookies(resp, generate_access_token(user_id))
+            return resp
+
+        # Presented long after it was exchanged: a copy is circulating and the
+        # whole family is no longer trustworthy.
+        logging.warning('Refresh token reuse for user %s', user_id)
+        revoke_refresh_family(user_id)
+        db.session.commit()
+        resp = jsonify({'message': 'Refresh token reuse detected'})
+        clear_auth_cookies(resp)
+        return resp, 401
+    elif record.revoked_at is not None:
+        resp = jsonify({'message': 'Refresh token revoked'})
+        clear_auth_cookies(resp)
+        return resp, 401
+    elif record.expires_at <= datetime.datetime.utcnow():
+        resp = jsonify({'message': 'Refresh token expired'})
+        clear_auth_cookies(resp)
+        return resp, 401
+
+    if not db.session.get(User, user_id):
+        resp = jsonify({'message': 'Unknown user'})
+        clear_auth_cookies(resp)
+        return resp, 401
+
+    new_refresh, _ = issue_refresh_token(user_id)
+    if record is not None:
+        record.rotated_to = RefreshToken.hash_token(new_refresh)
+    db.session.commit()
+
     new_access = generate_access_token(user_id)
 
     resp = jsonify({'message': 'refreshed'})
-    resp.set_cookie(
-        'access_token',
-        new_access,
-        httponly=True,
-        secure=True,
-        samesite='Lax',
-        path='/',
-        max_age=15 * 60
-    )
+    # The refresh cookie is reissued too, so the 90-day window slides forward
+    # on every use: an app opened regularly never asks for a password again.
+    set_auth_cookies(resp, new_access, new_refresh)
     return resp
 
 @app.route('/api/check_username', methods=['GET'])
