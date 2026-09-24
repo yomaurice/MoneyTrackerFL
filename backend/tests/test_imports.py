@@ -108,11 +108,93 @@ def test_reuploading_the_same_file_stages_nothing_new(app, uid, login):
 
     assert second.status_code == 201
     body = second.get_json()
-    assert body['duplicates_skipped'] == 3
     assert body['batch']['new'] == 0
+    # Still awaiting review, so they are matched again rather than skipped.
+    assert body['rechecked'] == 3
+    assert body['duplicates_skipped'] == 0
 
     with app.app_context():
         assert StagedTransaction.query.filter_by(user_id=uid).count() == 3
+
+
+def test_a_reupload_rematches_pending_rows_against_new_entries(app, uid, login):
+    """Add the missing expense by hand, upload again: it is now matched."""
+    client = login(USER)
+    upload(client)
+    with app.app_context():
+        db.session.add(Transaction(
+            user_id=uid, type='expense', category='zzGroceriesImp',
+            amount=300.00, date=datetime.date(2026, 4, 7),
+            description='fuel', currency='ILS', exchange_rate=1.0,
+        ))
+        db.session.commit()
+
+    body = upload(client).get_json()
+
+    assert body['batch']['matched'] == 1
+    with app.app_context():
+        fuel = StagedTransaction.query.filter_by(user_id=uid, amount=300.0).one()
+        assert fuel.state == STAGED_MATCHED
+
+
+def test_a_reupload_leaves_decided_rows_alone(app, uid, login):
+    """Skipped stays skipped; confirmed stays confirmed."""
+    from models import STAGED_SKIPPED
+
+    client = login(USER)
+    upload(client)
+    with app.app_context():
+        rows = StagedTransaction.query.filter_by(user_id=uid).order_by(
+            StagedTransaction.amount).all()
+        rows[0].state = STAGED_SKIPPED
+        rows[1].state = STAGED_CONFIRMED
+        db.session.commit()
+
+    body = upload(client).get_json()
+
+    assert body['duplicates_skipped'] == 2
+    assert body['rechecked'] == 1
+    with app.app_context():
+        states = sorted(
+            r.state for r in StagedTransaction.query.filter_by(user_id=uid)
+        )
+        assert states == sorted([STAGED_SKIPPED, STAGED_CONFIRMED,
+                                 STAGED_PROPOSED])
+
+
+def test_the_max_merchant_column_is_recognised(app, uid, login):
+    """Max writes "שם בית העסק"; the ה used to hide it from detection."""
+    rows = [
+        ['תאריך עסקה', 'שם בית העסק', 'קטגוריה', 'סכום חיוב', 'מטבע חיוב',
+         'הערות'],
+        ['03/04/2026', 'שופרסל דיל', 'מזון', '52.90', '₪', ''],
+        ['05/04/2026', 'איקאה', 'ריהוט', '400.00', '₪', 'תשלום 2 מתוך 3'],
+    ]
+    upload(login(USER), rows=rows)
+
+    with app.app_context():
+        staged = StagedTransaction.query.filter_by(user_id=uid).order_by(
+            StagedTransaction.amount).all()
+        assert [s.merchant_raw for s in staged] == ['שופרסל דיל', 'איקאה']
+        assert (staged[1].installment_no, staged[1].installment_total) == (2, 3)
+
+
+def test_a_saved_mapping_gains_columns_detection_now_finds(app, uid, login):
+    """A profile saved before the merchant column was recognised still gets it."""
+    client = login(USER)
+    profile = make_profile(client)
+    with app.app_context():
+        saved = db.session.get(SourceProfile, profile['id'])
+        saved.column_mapping = {'txn_date': 0, 'amount': 2}
+        db.session.commit()
+
+    upload(client, source_profile_id=str(profile['id']))
+
+    with app.app_context():
+        assert all(
+            s.merchant_raw
+            for s in StagedTransaction.query.filter_by(user_id=uid)
+        )
 
 
 def test_a_bank_profile_suppresses_the_card_settlement_line(app, uid, login):

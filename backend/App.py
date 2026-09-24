@@ -81,12 +81,14 @@ from routes.transactions_bulk import transactions_bulk_bp  # noqa: E402
 from routes.review import review_bp  # noqa: E402
 from routes.source_profiles import source_profiles_bp  # noqa: E402
 from routes.imports import imports_bp  # noqa: E402
+from routes.transactions_search import transactions_search_bp  # noqa: E402
 
 app.register_blueprint(tokens_bp)
 app.register_blueprint(transactions_bulk_bp)
 app.register_blueprint(review_bp)
 app.register_blueprint(source_profiles_bp)
 app.register_blueprint(imports_bp)
+app.register_blueprint(transactions_search_bp)
 
 # Statements are small. Flask rejects anything larger before it reaches a view,
 # so an oversized upload cannot occupy memory on the 512MB free tier.

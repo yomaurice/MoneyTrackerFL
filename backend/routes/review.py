@@ -12,6 +12,7 @@ from auth import login_required
 from models import (
     STAGED_AMBIGUOUS,
     STAGED_CONFIRMED,
+    STAGED_IGNORED,
     STAGED_MATCHED,
     STAGED_PROPOSED,
     STAGED_SKIPPED,
@@ -19,7 +20,7 @@ from models import (
     Transaction,
     db,
 )
-from services import categorize
+from services import categorize, reconcile
 from services.validation import ValidationError, validate_transaction
 
 review_bp = Blueprint('review', __name__, url_prefix='/api/review')
@@ -30,8 +31,46 @@ MAX_CONFIRM_ROWS = 200
 
 REVIEWABLE_STATES = (STAGED_PROPOSED, STAGED_AMBIGUOUS)
 
+# "Already in" without naming which transaction: the user says it is tracked,
+# and that outranks the scorer, but there is no pairing to learn from.
+IGNORED_ALREADY_TRACKED = 'already_tracked'
 
-def _serialise(staged, position=None, total=None):
+
+def _now():
+    return datetime.datetime.utcnow()
+
+
+def _serialise_txn(txn):
+    return {
+        'id': txn.id,
+        'date': txn.date.isoformat() if txn.date else None,
+        'amount': txn.amount,
+        'currency': txn.currency or 'ILS',
+        'type': txn.type,
+        'category': txn.category,
+        'description': txn.description,
+    }
+
+
+def _candidates_for(rows, user_id):
+    """Candidate transactions per staged row, fetched in one query."""
+    ids = {i for r in rows for i in (r.candidate_ids or [])}
+    if not ids:
+        return {}
+    txns = {
+        t.id: t for t in Transaction.query.filter(
+            Transaction.user_id == user_id, Transaction.id.in_(ids)
+        ).all()
+    }
+    return {
+        r.id: [_serialise_txn(txns[i]) for i in (r.candidate_ids or [])
+               if i in txns]
+        for r in rows
+    }
+
+
+def _serialise(staged, position=None, total=None, candidates=None):
+    raw = staged.raw if isinstance(staged.raw, dict) else {}
     body = {
         'id': staged.id,
         'state': staged.state,
@@ -56,6 +95,10 @@ def _serialise(staged, position=None, total=None):
         'suggested_category': staged.suggested_category,
         'suggested_description': staged.suggested_description,
         'category_confidence': staged.category_confidence,
+        # The whole line as the issuer wrote it, for when the merchant column
+        # was not recognised and the card would otherwise say nothing.
+        'raw_cells': [c for c in (raw.get('cells') or []) if c not in (None, '')],
+        'candidates': candidates or [],
     }
     if position is not None:
         body['position'] = position
@@ -90,16 +133,23 @@ def review_queue():
 
     total = query.count()
     rows = query.limit(QUEUE_LIMIT).all()
+    candidates = _candidates_for(rows, g.user_id)
+
+    skipped = StagedTransaction.query.filter_by(
+        user_id=g.user_id, state=STAGED_SKIPPED
+    ).count()
 
     return jsonify({
         'total': total,
         # The wizard's "4 / 9" comes straight from these, so the count and the
         # positions can never disagree.
         'items': [
-            _serialise(row, position=i + 1, total=total)
+            _serialise(row, position=i + 1, total=total,
+                       candidates=candidates.get(row.id))
             for i, row in enumerate(rows)
         ],
         'ambiguous': sum(1 for r in rows if r.state == STAGED_AMBIGUOUS),
+        'skipped': skipped,
     })
 
 
@@ -204,6 +254,7 @@ def review_confirm():
     for staged, txn, row in created:
         staged.state = STAGED_CONFIRMED
         staged.created_txn_id = txn.id
+        staged.reviewed_at = _now()
         # Learning from the accepted pairing is what makes the next import
         # better than this one.
         categorize.learn(
@@ -251,8 +302,10 @@ def review_skip():
         StagedTransaction.state.in_(REVIEWABLE_STATES),
     ).all()
 
+    now = _now()
     for row in rows:
         row.state = STAGED_SKIPPED
+        row.reviewed_at = now
     db.session.commit()
 
     return jsonify({
@@ -298,11 +351,116 @@ def review_link():
     staged.state = STAGED_MATCHED
     staged.matched_txn_id = txn.id
     staged.candidate_ids = None
-    staged.match_score = 1.0  # a person said so; that outranks the scorer
+    # A person said so; that outranks the scorer. It is also what teaches the
+    # matcher this merchant's name for next month (see learned_aliases).
+    staged.match_score = 1.0
+    staged.reviewed_at = _now()
     db.session.commit()
 
     return jsonify({
         'message': 'Linked',
         'id': staged.id,
         'transaction_id': txn.id,
+    })
+
+
+@review_bp.route('/already', methods=['POST'])
+@login_required
+def review_already():
+    """"Already in": the charge is tracked, without naming which transaction.
+
+    For when the user knows it is there but it does not look like anything the
+    matcher could find -- split across two entries, say, or logged months ago.
+    Linking to a specific transaction (/link) is better when possible, since
+    only a named pairing teaches the matcher.
+    """
+    body = request.get_json(silent=True) or {}
+    staged_id = body.get('id')
+    if not isinstance(staged_id, int):
+        return jsonify({'message': 'id is a required integer'}), 400
+
+    staged = StagedTransaction.query.filter_by(
+        id=staged_id, user_id=g.user_id
+    ).first()
+    if staged is None:
+        return jsonify({'message': 'Staged row not found'}), 404
+    if staged.state not in REVIEWABLE_STATES:
+        return jsonify({
+            'message': 'row is not awaiting review', 'state': staged.state
+        }), 409
+
+    staged.state = STAGED_IGNORED
+    staged.ignored_reason = IGNORED_ALREADY_TRACKED
+    staged.reviewed_at = _now()
+    db.session.commit()
+
+    return jsonify({'message': 'Marked as already tracked', 'id': staged.id})
+
+
+def _restored_state(row):
+    """Where a skipped row goes back to: ambiguous if it was, else proposed."""
+    strong = (
+        row.candidate_ids
+        and len(row.candidate_ids) > 1
+        and (row.match_score or 0) >= reconcile.MATCH_THRESHOLD
+    )
+    return STAGED_AMBIGUOUS if strong else STAGED_PROPOSED
+
+
+@review_bp.route('/unskip', methods=['POST'])
+@login_required
+def review_unskip():
+    """Bring skipped rows back into the queue.
+
+    `{"id": n}` for one row, `{"latest": true}` for the most recently skipped
+    (the wizard's "back"), or `{"all": true}` to go over every skipped row again.
+    """
+    body = request.get_json(silent=True) or {}
+    query = StagedTransaction.query.filter_by(
+        user_id=g.user_id, state=STAGED_SKIPPED
+    )
+
+    if isinstance(body.get('id'), int):
+        rows = query.filter(StagedTransaction.id == body['id']).all()
+    elif body.get('latest') is True:
+        row = query.order_by(
+            StagedTransaction.reviewed_at.desc().nullslast(),
+            StagedTransaction.id.desc(),
+        ).first()
+        rows = [row] if row else []
+    elif body.get('all') is True:
+        rows = query.all()
+    else:
+        return jsonify({
+            'message': 'send an integer id, latest: true, or all: true'
+        }), 400
+
+    for row in rows:
+        row.state = _restored_state(row)
+        row.reviewed_at = None
+    db.session.commit()
+
+    candidates = _candidates_for(rows, g.user_id)
+    return jsonify({
+        'message': f'{len(rows)} rows back in the queue',
+        'count': len(rows),
+        'items': [_serialise(r, candidates=candidates.get(r.id)) for r in rows],
+    })
+
+
+@review_bp.route('/rematch', methods=['POST'])
+@login_required
+def review_rematch():
+    """Run the matcher again over everything still waiting for review.
+
+    Useful after linking a few rows (the matcher has learned new names) or
+    after adding the missing transactions by hand elsewhere.
+    """
+    rows = _queue_query(g.user_id).all()
+    counts = reconcile.reconcile_batch(rows)
+    db.session.commit()
+    return jsonify({
+        'message': f"{counts['matched']} newly matched",
+        'matched': counts['matched'],
+        'remaining': counts['proposed'] + counts['ambiguous'],
     })

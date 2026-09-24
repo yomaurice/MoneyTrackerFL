@@ -338,3 +338,159 @@ def test_link_rejects_malformed_input(app, uid, login):
                                                         'transaction_id': 'b'}):
         assert client.post('/api/review/link', json=body,
                            base_url=BASE).status_code == 400
+
+
+# --- candidates, already in, back, re-check --------------------------------
+
+def _txn(uid, amount=52.90, day=DAY, description='groceries'):
+    txn = Transaction(user_id=uid, type='expense', category='zzGroceries',
+                      amount=amount, date=day, description=description,
+                      currency='ILS', exchange_rate=1.0)
+    db.session.add(txn)
+    db.session.commit()
+    return txn.id
+
+
+def test_queue_carries_candidate_details_and_the_raw_line(app, uid, login):
+    """The wizard shows "is it this one?" without a second round-trip."""
+    with app.app_context():
+        txn_id = _txn(uid, description='weekly shop')
+        stage(uid, candidate_ids=[txn_id],
+              raw={'cells': ['03/04/2026', 'שופרסל דיל', None, '52.90'],
+                   'file': 'max.xlsx'})
+
+    item = login(USER).get('/api/review/queue',
+                           base_url=BASE).get_json()['items'][0]
+
+    assert item['candidates'][0]['id'] == txn_id
+    assert item['candidates'][0]['description'] == 'weekly shop'
+    assert item['raw_cells'] == ['03/04/2026', 'שופרסל דיל', '52.90']
+
+
+def test_already_in_takes_the_row_out_of_the_queue(app, uid, login):
+    from models import STAGED_IGNORED
+
+    with app.app_context():
+        sid = stage(uid)
+
+    client = login(USER)
+    res = client.post('/api/review/already', json={'id': sid}, base_url=BASE)
+
+    assert res.status_code == 200
+    assert client.get('/api/review/queue',
+                      base_url=BASE).get_json()['total'] == 0
+    with app.app_context():
+        row = db.session.get(StagedTransaction, sid)
+        assert row.state == STAGED_IGNORED
+        assert row.ignored_reason == 'already_tracked'
+        assert row.reviewed_at is not None
+
+
+def test_already_in_refuses_rows_not_awaiting_review(app, uid, login):
+    with app.app_context():
+        sid = stage(uid, state=STAGED_CONFIRMED)
+    res = login(USER).post('/api/review/already', json={'id': sid},
+                           base_url=BASE)
+    assert res.status_code == 409
+
+
+def test_back_restores_the_most_recently_skipped(app, uid, login):
+    with app.app_context():
+        first = stage(uid, 10.0, dedup='k1')
+        second = stage(uid, 20.0, dedup='k2')
+
+    client = login(USER)
+    client.post('/api/review/skip', json={'id': first}, base_url=BASE)
+    client.post('/api/review/skip', json={'id': second}, base_url=BASE)
+
+    body = client.post('/api/review/unskip', json={'latest': True},
+                       base_url=BASE).get_json()
+
+    assert [i['id'] for i in body['items']] == [second]
+    with app.app_context():
+        assert db.session.get(StagedTransaction, second).state == STAGED_PROPOSED
+        assert db.session.get(StagedTransaction, first).state == STAGED_SKIPPED
+
+
+def test_unskip_all_puts_every_skipped_row_back(app, uid, login):
+    with app.app_context():
+        ids = [stage(uid, float(n), dedup=f'u{n}') for n in (1, 2, 3)]
+
+    client = login(USER)
+    client.post('/api/review/skip', json={'ids': ids}, base_url=BASE)
+    assert client.get('/api/review/queue',
+                      base_url=BASE).get_json()['skipped'] == 3
+
+    client.post('/api/review/unskip', json={'all': True}, base_url=BASE)
+
+    queue = client.get('/api/review/queue', base_url=BASE).get_json()
+    assert queue['total'] == 3
+    assert queue['skipped'] == 0
+
+
+def test_unskip_restores_an_ambiguous_row_as_ambiguous(app, uid, login):
+    with app.app_context():
+        a, b = _txn(uid), _txn(uid)
+        sid = stage(uid, state=STAGED_SKIPPED, candidate_ids=[a, b],
+                    match_score=0.8)
+
+    login(USER).post('/api/review/unskip', json={'id': sid}, base_url=BASE)
+
+    with app.app_context():
+        assert db.session.get(StagedTransaction, sid).state == STAGED_AMBIGUOUS
+
+
+def test_unskip_will_not_touch_another_users_rows(app, uid, login, make_user):
+    other = make_user(OTHER)
+    with app.app_context():
+        sid = stage(other, state=STAGED_SKIPPED)
+
+    body = login(USER).post('/api/review/unskip', json={'id': sid},
+                            base_url=BASE).get_json()
+
+    assert body['count'] == 0
+    with app.app_context():
+        assert db.session.get(StagedTransaction, sid).state == STAGED_SKIPPED
+
+
+def test_unskip_rejects_a_body_that_names_nothing(app, uid, login):
+    res = login(USER).post('/api/review/unskip', json={}, base_url=BASE)
+    assert res.status_code == 400
+
+
+def test_a_link_teaches_the_merchant_name_for_next_month(app, uid, login):
+    """Link "hot mobile" to "phone bill" once; next month it matches alone."""
+    from services import reconcile
+
+    with app.app_context():
+        this_month = _txn(uid, 89.90, day=DAY, description='phone bill')
+        sid = stage(uid, 89.90, merchant='hot mobile', dedup='m1')
+
+    login(USER).post('/api/review/link',
+                     json={'id': sid, 'transaction_id': this_month},
+                     base_url=BASE)
+
+    with app.app_context():
+        next_day = DAY + datetime.timedelta(days=31)
+        _txn(uid, 89.90, day=next_day - datetime.timedelta(days=8),
+             description='phone bill')
+        nxt = db.session.get(StagedTransaction, stage(
+            uid, 89.90, merchant='hot mobile', day=next_day, dedup='m2'))
+        reconcile.reconcile_row(nxt)
+        assert nxt.state == STAGED_MATCHED
+        db.session.rollback()
+
+
+def test_recheck_matches_rows_whose_counterpart_now_exists(app, uid, login):
+    with app.app_context():
+        stage(uid, 52.90, dedup='r1')
+        stage(uid, 77.00, dedup='r2', merchant='רמי לוי')
+        _txn(uid, 52.90, description='supermarket')
+
+    client = login(USER)
+    body = client.post('/api/review/rematch', base_url=BASE).get_json()
+
+    assert body['matched'] == 1
+    assert body['remaining'] == 1
+    assert client.get('/api/review/queue',
+                      base_url=BASE).get_json()['total'] == 1

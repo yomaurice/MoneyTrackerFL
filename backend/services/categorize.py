@@ -127,7 +127,11 @@ def extract_installment(text):
     """
     if not text:
         return None, None
-    match = re.search(r'\b(\d{1,2})\s*/\s*(\d{1,2})\b', str(text))
+    # "3/12" inside the description, or Max's "תשלום 3 מתוך 12" in the notes.
+    match = (
+        re.search(r'\b(\d{1,2})\s*/\s*(\d{1,2})\b', str(text))
+        or re.search(r'תשלום\s*(\d{1,2})\s*מתוך\s*(\d{1,2})', str(text))
+    )
     if not match:
         return None, None
     no, total = int(match.group(1)), int(match.group(2))

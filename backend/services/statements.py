@@ -40,7 +40,10 @@ FIELD_KEYWORDS = (
         'posting date', 'value date', 'charge date',
     )),
     ('merchant_raw', (
-        'שם בית עסק', 'בית עסק', 'תאור', 'תיאור', 'פרטים', 'שם העסק',
+        # Max writes the definite form (שם בית העסק), Isracard and Cal the
+        # bare one; substring matching does not bridge the extra ה.
+        'שם בית העסק', 'שם בית עסק', 'בית העסק', 'בית עסק', 'תיאור התנועה',
+        'תאור', 'תיאור', 'הפעולה', 'פרטים', 'שם העסק',
         'merchant', 'description', 'details', 'business',
     )),
     ('amount', (
@@ -319,6 +322,15 @@ def parse_statement(filename, data, mapping=None, header_row=None):
 
     headers = [h if h is not None else '' for h in table[header_index]]
     resolved = dict(mapping) if mapping else guess_mapping(headers)
+    if mapping:
+        # A saved mapping only ever records what detection found at the time,
+        # so a field the detector has since learned to spot (Max's merchant
+        # column) would stay missing forever. Fill the gaps, never override.
+        taken = set(resolved.values())
+        for field, index in guess_mapping(headers).items():
+            if field not in resolved and index not in taken:
+                resolved[field] = index
+                taken.add(index)
 
     missing = [f for f in REQUIRED_FIELDS if f not in resolved]
     if missing and 'amount' in missing and 'credit_amount' in resolved:
@@ -364,7 +376,10 @@ def parse_statement(filename, data, mapping=None, header_row=None):
 
         merchant = cell(raw_row, 'merchant_raw')
         merchant = '' if merchant is None else str(merchant).strip()
+        memo = _as_text(cell(raw_row, 'memo'))
         installment_no, installment_total = categorize.extract_installment(merchant)
+        if installment_total is None:
+            installment_no, installment_total = categorize.extract_installment(memo)
 
         rows.append({
             'txn_date': txn_date,
@@ -377,7 +392,7 @@ def parse_statement(filename, data, mapping=None, header_row=None):
             ) or 'ILS',
             'merchant_raw': merchant or None,
             'merchant_clean': categorize.clean_merchant(merchant) or None,
-            'memo': _as_text(cell(raw_row, 'memo')),
+            'memo': memo,
             'issuer_status': _as_text(cell(raw_row, 'issuer_status')),
             'external_id': _as_text(cell(raw_row, 'external_id')),
             'installment_no': installment_no,

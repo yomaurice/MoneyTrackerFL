@@ -33,25 +33,71 @@ from models import (
 )
 from services import categorize
 
-# A card purchase date and its posting date differ by days, and the tracked
-# transaction may carry either.
-DATE_SLACK_DAYS = 5
+# How far apart the statement date and the tracked date may be. Wide on
+# purpose: people log a purchase when they remember it, not when it happened.
+DATE_SLACK_DAYS = 10
 
-# Exact for ILS: the issuer and the user are reading the same shekel figure.
-# Loose for foreign currency, where the app's exchange_rate will not equal the
-# issuer's, so the converted amounts legitimately disagree.
-AMOUNT_TOL_SAME_CURRENCY = 0.0
-AMOUNT_TOL_FOREIGN = 0.02
-AMOUNT_TOL_ABSOLUTE = 0.02
+# --- the confidence equation ---------------------------------------------
+#
+#   score = amount + date + name            (capped at 1.0)
+#
+# Amount carries most of the weight, because it is the one field both sides
+# record identically. Name is a medium factor that mostly helps: the user's own
+# descriptions rarely look like the issuer's merchant string, so a mismatch
+# costs very little, while a match -- or a pairing learned from an earlier
+# month -- adds a lot.
+#
+#   amount  exact (within 0.01)            0.60
+#           within 2 units                 0.50 -> 0.40, sliding with the gap
+#           further                        not a candidate
+#   date    0.20 * (1 - days / 12)         0.20 same day, 0.03 at 10 days
+#   name    learned from a past pairing   +0.25
+#           similar (>= 0.75)             +0.20
+#           partly similar (>= 0.50)      +0.10
+#           missing on either side         0
+#           clearly different (< 0.30)    -0.05
+#
+# Worked through: exact amount, 3 days apart, names unrelated = 0.60 + 0.15 -
+# 0.05 = 0.70, a match. 1.50 off, same day, unrelated names = 0.425 + 0.20 -
+# 0.05 = 0.575, a possible match the wizard offers but does not decide.
 
-MATCH_THRESHOLD = 0.85
+AMOUNT_EXACT = 0.01
+AMOUNT_NEAR_UNITS = 2.0
+# In a foreign currency the app's own exchange rate will not equal the
+# issuer's, so "near" scales with the amount there rather than staying at 2.
+AMOUNT_NEAR_FOREIGN_RATE = 0.02
+
+SCORE_AMOUNT_EXACT = 0.60
+SCORE_AMOUNT_NEAR_MAX = 0.50
+SCORE_AMOUNT_NEAR_MIN = 0.40
+
+SCORE_DATE_MAX = 0.20
+
+SCORE_NAME_LEARNED = 0.25
+SCORE_NAME_SIMILAR = 0.20
+SCORE_NAME_PARTIAL = 0.10
+SCORE_NAME_MISMATCH = -0.05
+
+NAME_SIMILAR = 0.75
+NAME_PARTIAL = 0.50
+NAME_MISMATCH = 0.30
+# Two words are "the same" at this similarity (שופרסל / שופרסל-דיל, a typo).
+WORD_ALIKE = 0.80
+# Whole strings only count as similar when they are nearly identical.
+STRING_ALIKE = 0.85
+
+MATCH_THRESHOLD = 0.70
+# Below a match but worth showing: the wizard offers these as "is it this
+# one?" instead of leaving the user to hunt for it.
+POSSIBLE_THRESHOLD = 0.45
 # How far clear the best candidate must be before it is treated as *the* match
 # rather than one of several.
 RUNNER_UP_MARGIN = 0.10
 
-WEIGHT_AMOUNT = 0.55
-WEIGHT_DATE = 0.25
-WEIGHT_DESCRIPTION = 0.20
+# A past pairing only teaches a name alias if a person made it or the scorer
+# was sure. Learning from shaky auto-matches would let one wrong guess
+# reinforce itself every month.
+LEARN_FROM_SCORE = 0.80
 
 # Bank lines that are really the monthly card settlement. Suppressing these is
 # the double-count guard.
@@ -101,17 +147,17 @@ BASE_CURRENCY = 'ILS'
 
 
 def _amount_tolerance(currency, amount):
-    """How far apart two amounts may be and still be the same charge.
+    """The widest gap at which two amounts can still be the same charge.
 
-    Keyed on whether the charge is in the base currency, not on whether the two
-    sides agree with each other. In shekels both sides are reading the same
-    figure, so any gap is a different charge. In any other currency the app
-    stored a converted amount using its own `exchange_rate`, which will not
-    equal the issuer's, so the two legitimately disagree by a fraction.
+    Two units in shekels, where a gap means rounding or a tip. In any other
+    currency the app stored a converted amount using its own `exchange_rate`,
+    which will not equal the issuer's, so the allowance grows with the amount.
     """
     is_base = (currency or BASE_CURRENCY).upper() == BASE_CURRENCY
-    rate = AMOUNT_TOL_SAME_CURRENCY if is_base else AMOUNT_TOL_FOREIGN
-    return max(AMOUNT_TOL_ABSOLUTE, abs(float(amount or 0)) * rate)
+    if is_base:
+        return AMOUNT_NEAR_UNITS
+    return max(AMOUNT_NEAR_UNITS,
+               abs(float(amount or 0)) * AMOUNT_NEAR_FOREIGN_RATE)
 
 
 def is_card_aggregate(text, patterns=None):
@@ -132,51 +178,129 @@ def is_card_aggregate(text, patterns=None):
 
 def _date_score(staged_date, txn_date):
     if not staged_date or not txn_date:
-        return 0.0
+        return None
     days = abs((staged_date - txn_date).days)
     if days > DATE_SLACK_DAYS:
-        return 0.0
-    return 1.0 - (days / (DATE_SLACK_DAYS + 1))
+        return None
+    return SCORE_DATE_MAX * (1 - days / (DATE_SLACK_DAYS + 2))
 
 
 def _amount_score(staged_amount, txn_amount, tolerance):
     if staged_amount is None or txn_amount is None:
-        return 0.0
+        return None
     delta = abs(float(staged_amount) - float(txn_amount))
+    if delta <= AMOUNT_EXACT:
+        return SCORE_AMOUNT_EXACT
     if delta > tolerance:
-        return 0.0
-    if tolerance == 0:
-        return 1.0
-    return 1.0 - (delta / tolerance) * 0.15  # near-exact stays near-1
+        return None
+    slide = (delta - AMOUNT_EXACT) / (tolerance - AMOUNT_EXACT)
+    return SCORE_AMOUNT_NEAR_MAX - slide * (
+        SCORE_AMOUNT_NEAR_MAX - SCORE_AMOUNT_NEAR_MIN
+    )
 
 
-def _description_score(staged_text, txn_text):
-    a = categorize.normalize(staged_text)
-    b = categorize.normalize(txn_text)
+def name_similarity(a, b):
+    """0..1, or None when either side has no name.
+
+    Word-based, because whole-string character similarity is noise on short
+    names: "hot mobile" and "phone bill" share enough letters to score 0.6.
+    Instead: one name contained in the other, or the share of the shorter
+    name's words that have a near-identical word on the other side. Whole-string
+    similarity only counts when it is near-identical (a typo, a spacing change).
+    """
+    a, b = categorize.normalize(a), categorize.normalize(b)
     if not a or not b:
-        # No description on either side is not evidence against a match, so
-        # this stays neutral rather than scoring zero and sinking a good pair.
-        return 0.5
-    return difflib.SequenceMatcher(None, a, b).ratio()
+        return None
+    # Containment, but not for a two-letter fragment that is inside everything.
+    if min(len(a), len(b)) >= 3 and (a in b or b in a):
+        return 1.0
+
+    words_a = [w for w in a.split() if len(w) > 1]
+    words_b = [w for w in b.split() if len(w) > 1]
+    overlap = 0.0
+    if words_a and words_b:
+        shorter, longer = sorted((words_a, words_b), key=len)
+        hits = sum(
+            1 for w in shorter
+            if any(
+                w in v or v in w
+                or difflib.SequenceMatcher(None, w, v).ratio() >= WORD_ALIKE
+                for v in longer
+            )
+        )
+        overlap = hits / len(shorter)
+
+    ratio = difflib.SequenceMatcher(None, a, b).ratio()
+    return max(overlap, ratio if ratio >= STRING_ALIKE else 0.0)
 
 
-def score_candidate(staged, txn):
-    tolerance = _amount_tolerance(staged.currency, staged.amount)
-    amount = _amount_score(staged.amount, txn.amount, tolerance)
-    if amount == 0.0:
-        return 0.0
-    date = _date_score(staged.txn_date, txn.date)
-    if date == 0.0:
-        return 0.0
-    description = _description_score(
+def _name_score(staged, txn, aliases):
+    description = categorize.normalize(txn.description)
+    if description and description in aliases:
+        return SCORE_NAME_LEARNED
+    similarity = name_similarity(
         staged.merchant_clean or staged.merchant_raw, txn.description
     )
-    return round(
-        WEIGHT_AMOUNT * amount
-        + WEIGHT_DATE * date
-        + WEIGHT_DESCRIPTION * description,
-        4,
+    if similarity is None:
+        # No name on either side is not evidence against a match.
+        return 0.0
+    if similarity >= NAME_SIMILAR:
+        return SCORE_NAME_SIMILAR
+    if similarity >= NAME_PARTIAL:
+        return SCORE_NAME_PARTIAL
+    if similarity < NAME_MISMATCH:
+        return SCORE_NAME_MISMATCH
+    return 0.0
+
+
+def learned_aliases(user_id, merchant):
+    """Descriptions this merchant has been paired with before.
+
+    The memory for repeating charges: once a monthly "HOT MOBILE" line has been
+    paired with the user's "phone bill", every later month recognises it by
+    name even though the two strings share nothing.
+    """
+    from models import STAGED_CONFIRMED, StagedTransaction
+
+    key = categorize.clean_merchant(merchant)
+    if not key:
+        return frozenset()
+
+    rows = (
+        db.session.query(Transaction.description)
+        .join(
+            StagedTransaction,
+            db.or_(
+                StagedTransaction.matched_txn_id == Transaction.id,
+                StagedTransaction.created_txn_id == Transaction.id,
+            ),
+        )
+        .filter(
+            StagedTransaction.user_id == user_id,
+            StagedTransaction.merchant_clean == key,
+            db.or_(
+                StagedTransaction.state == STAGED_CONFIRMED,
+                db.and_(
+                    StagedTransaction.state == STAGED_MATCHED,
+                    StagedTransaction.match_score >= LEARN_FROM_SCORE,
+                ),
+            ),
+        )
+        .all()
     )
+    return frozenset(categorize.normalize(d) for (d,) in rows if d)
+
+
+def score_candidate(staged, txn, aliases=frozenset()):
+    tolerance = _amount_tolerance(staged.currency, staged.amount)
+    amount = _amount_score(staged.amount, txn.amount, tolerance)
+    if amount is None:
+        return 0.0
+    date = _date_score(staged.txn_date, txn.date)
+    if date is None:
+        return 0.0
+    name = _name_score(staged, txn, aliases)
+    return round(max(0.0, min(1.0, amount + date + name)), 4)
 
 
 def find_candidates(staged, claimed_ids=()):
@@ -209,7 +333,7 @@ def find_candidates(staged, claimed_ids=()):
 
 
 def reconcile_row(staged, claimed_ids=None, exclude_patterns=None,
-                  profile_kind=None):
+                  profile_kind=None, alias_cache=None):
     """Decide one staged row's verdict in place. Caller commits.
 
     `claimed_ids` is carried across a run so two staged rows cannot both claim
@@ -233,13 +357,23 @@ def reconcile_row(staged, claimed_ids=None, exclude_patterns=None,
         staged.ignored_reason = IGNORED_CARD_AGGREGATE
         return staged
 
+    # A row can be reconciled again (a re-upload, or "re-check" in the
+    # wizard), so clear the previous verdict's link before deciding afresh.
+    staged.matched_txn_id = None
+
+    merchant = staged.merchant_clean or staged.merchant_raw
+    cache = alias_cache if alias_cache is not None else {}
+    key = categorize.clean_merchant(merchant)
+    if key not in cache:
+        cache[key] = learned_aliases(staged.user_id, merchant)
+
     candidates = find_candidates(staged, claimed)
     scored = sorted(
-        ((score_candidate(staged, t), t) for t in candidates),
+        ((score_candidate(staged, t, cache[key]), t) for t in candidates),
         key=lambda pair: pair[0],
         reverse=True,
     )
-    scored = [pair for pair in scored if pair[0] > 0]
+    scored = [pair for pair in scored if pair[0] >= POSSIBLE_THRESHOLD]
 
     if not scored:
         staged.state = STAGED_PROPOSED
@@ -266,7 +400,7 @@ def reconcile_row(staged, claimed_ids=None, exclude_patterns=None,
         return staged
 
     # Something similar exists but not similar enough. Propose it, and keep the
-    # near-misses so the wizard can show why it is not being called a match.
+    # near-misses so the wizard can offer them as "is it this one?".
     staged.state = STAGED_PROPOSED
     staged.match_score = best_score
     staged.candidate_ids = [t.id for _, t in scored[:3]]
@@ -277,6 +411,7 @@ def reconcile_batch(staged_rows, profile_kind=None, exclude_patterns=None,
                     apply_suggestions=True):
     """Reconcile a whole batch and return counters for the ImportBatch row."""
     claimed = set()
+    aliases = {}
     counts = {
         'received': len(staged_rows),
         'matched': 0,
@@ -291,6 +426,7 @@ def reconcile_batch(staged_rows, profile_kind=None, exclude_patterns=None,
             claimed_ids=claimed,
             exclude_patterns=exclude_patterns,
             profile_kind=profile_kind,
+            alias_cache=aliases,
         )
 
         if apply_suggestions and staged.state in (

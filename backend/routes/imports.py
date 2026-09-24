@@ -14,7 +14,9 @@ from flask import Blueprint, g, jsonify, request
 
 from auth import login_required
 from models import (
+    STAGED_AMBIGUOUS,
     STAGED_CONFIRMED,
+    STAGED_PROPOSED,
     ImportBatch,
     SourceProfile,
     StagedTransaction,
@@ -129,9 +131,22 @@ def upload_statement():
     # unique (user_id, dedup_hash) index is the real guarantee; this check
     # keeps a re-upload from failing the whole request on a constraint error.
     seen = {
-        h for (h,) in db.session.query(StagedTransaction.dedup_hash)
-        .filter(StagedTransaction.user_id == g.user_id).all()
+        h: (row_id, state) for (h, row_id, state) in db.session.query(
+            StagedTransaction.dedup_hash,
+            StagedTransaction.id,
+            StagedTransaction.state,
+        ).filter(StagedTransaction.user_id == g.user_id).all()
     }
+
+    # A row seen before but still waiting for review is refreshed and matched
+    # again, so re-uploading after the matcher improved (or after adding the
+    # missing entries by hand) is useful. Anything the user already decided --
+    # confirmed, skipped, "already in" -- is left exactly as they left it.
+    refreshable = {
+        row_id for (row_id, state) in seen.values()
+        if state in (STAGED_PROPOSED, STAGED_AMBIGUOUS)
+    }
+    refreshed = []
 
     staged_rows, duplicates = [], 0
     for row in rows:
@@ -145,9 +160,21 @@ def upload_statement():
             row.get('merchant_clean') or row.get('merchant_raw'),
         )
         if dedup in seen:
-            duplicates += 1
+            row_id = seen[dedup][0]
+            if row_id in refreshable:
+                refreshable.discard(row_id)
+                existing = db.session.get(StagedTransaction, row_id)
+                existing.merchant_raw = row.get('merchant_raw')
+                existing.merchant_clean = row.get('merchant_clean')
+                existing.memo = row.get('memo')
+                existing.posted_date = row.get('posted_date')
+                existing.installment_no = row.get('installment_no')
+                existing.installment_total = row.get('installment_total')
+                refreshed.append(existing)
+            else:
+                duplicates += 1
             continue
-        seen.add(dedup)
+        seen[dedup] = (None, None)
 
         staged_rows.append(StagedTransaction(
             user_id=g.user_id,
@@ -175,7 +202,7 @@ def upload_statement():
 
     try:
         counts = reconcile.reconcile_batch(
-            staged_rows,
+            staged_rows + refreshed,
             profile_kind=profile.kind if profile else None,
             exclude_patterns=profile.exclude_patterns if profile else None,
         )
@@ -207,6 +234,9 @@ def upload_statement():
         'message': f"{counts['proposed']} missing, {counts['matched']} matched",
         'batch': _serialise_batch(batch, profile.name if profile else None),
         'duplicates_skipped': duplicates,
+        # Previously imported rows still awaiting review, matched again. They
+        # are included in the matched/proposed counts above.
+        'rechecked': len(refreshed),
         'unreadable_rows': parsed['skipped'],
         'headers': parsed['headers'],
         'mapping': parsed['mapping'],

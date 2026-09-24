@@ -243,6 +243,8 @@ class StagedTransaction(db.Model):
     )
     ignored_reason = db.Column(db.String(40), nullable=True)
     created_at = db.Column(db.DateTime, nullable=False, server_default=db.func.now())
+    # When a person last acted on the row. Drives "back to the last skipped".
+    reviewed_at = db.Column(db.DateTime, nullable=True)
 
     __table_args__ = (
         # The idempotency guarantee: re-running an import, or the wallet
