@@ -407,10 +407,28 @@ def reconcile_row(staged, claimed_ids=None, exclude_patterns=None,
     return staged
 
 
+def paired_txn_ids(user_id):
+    """Transactions some staged row is already paired with.
+
+    Passed as `claimed_ids` when re-matching the queue, so a transaction the
+    user just linked to one charge cannot be handed to a second, identical one
+    (two ₪45 Wolt orders the same evening).
+    """
+    from models import STAGED_CONFIRMED, StagedTransaction
+
+    rows = db.session.query(
+        StagedTransaction.matched_txn_id, StagedTransaction.created_txn_id
+    ).filter(
+        StagedTransaction.user_id == user_id,
+        StagedTransaction.state.in_((STAGED_MATCHED, STAGED_CONFIRMED)),
+    ).all()
+    return {i for pair in rows for i in pair if i is not None}
+
+
 def reconcile_batch(staged_rows, profile_kind=None, exclude_patterns=None,
-                    apply_suggestions=True):
+                    apply_suggestions=True, claimed_ids=None):
     """Reconcile a whole batch and return counters for the ImportBatch row."""
-    claimed = set()
+    claimed = set(claimed_ids or ())
     aliases = {}
     counts = {
         'received': len(staged_rows),

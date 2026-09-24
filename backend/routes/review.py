@@ -69,6 +69,38 @@ def _candidates_for(rows, user_id):
     }
 
 
+def _relearn(user_id, merchants, exclude_ids=()):
+    """Re-match queued rows from merchants the user just made a decision on.
+
+    A link or a confirm teaches the matcher a name (learned_aliases) and a
+    category (MerchantRule). Applying that straight away to the rest of the
+    queue means the second Wolt charge of the month is matched, or at least
+    pre-filled, the moment the first one is resolved -- not next import.
+
+    Returns (ids that became matched, serialised rows still awaiting review).
+    Caller commits.
+    """
+    keys = {m for m in merchants if m}
+    if not keys:
+        return [], []
+    rows = _queue_query(user_id).filter(
+        StagedTransaction.merchant_clean.in_(keys),
+        ~StagedTransaction.id.in_(list(exclude_ids) or [-1]),
+    ).all()
+    if not rows:
+        return [], []
+
+    reconcile.reconcile_batch(
+        rows, claimed_ids=reconcile.paired_txn_ids(user_id)
+    )
+    matched = [r.id for r in rows if r.state == STAGED_MATCHED]
+    waiting = [r for r in rows if r.state in REVIEWABLE_STATES]
+    candidates = _candidates_for(waiting, user_id)
+    return matched, [
+        _serialise(r, candidates=candidates.get(r.id)) for r in waiting
+    ]
+
+
 def _serialise(staged, position=None, total=None, candidates=None):
     raw = staged.raw if isinstance(staged.raw, dict) else {}
     body = {
@@ -265,6 +297,12 @@ def review_confirm():
             txn_type=row['type'],
         )
 
+    db.session.flush()
+    auto_matched, updated = _relearn(
+        g.user_id,
+        {s.merchant_clean for s, _, _ in created},
+        exclude_ids=[s.id for s, _, _ in created],
+    )
     db.session.commit()
 
     return jsonify({
@@ -274,6 +312,9 @@ def review_confirm():
             {'staged_id': s.id, 'transaction_id': t.id}
             for s, t, _ in created
         ],
+        # Other queued charges this decision resolved or re-suggested.
+        'auto_matched': auto_matched,
+        'updated': updated,
     }), 201
 
 
@@ -355,12 +396,27 @@ def review_link():
     # matcher this merchant's name for next month (see learned_aliases).
     staged.match_score = 1.0
     staged.reviewed_at = _now()
+    # The linked entry's category and wording become the suggestion for this
+    # merchant's future charges, as a confirm already does.
+    categorize.learn(
+        user_id=g.user_id,
+        merchant_clean=staged.merchant_clean,
+        category=txn.category,
+        description=txn.description,
+        txn_type=txn.type,
+    )
+    db.session.flush()
+    auto_matched, updated = _relearn(
+        g.user_id, {staged.merchant_clean}, exclude_ids=[staged.id]
+    )
     db.session.commit()
 
     return jsonify({
         'message': 'Linked',
         'id': staged.id,
         'transaction_id': txn.id,
+        'auto_matched': auto_matched,
+        'updated': updated,
     })
 
 
@@ -457,7 +513,9 @@ def review_rematch():
     after adding the missing transactions by hand elsewhere.
     """
     rows = _queue_query(g.user_id).all()
-    counts = reconcile.reconcile_batch(rows)
+    counts = reconcile.reconcile_batch(
+        rows, claimed_ids=reconcile.paired_txn_ids(g.user_id)
+    )
     db.session.commit()
     return jsonify({
         'message': f"{counts['matched']} newly matched",

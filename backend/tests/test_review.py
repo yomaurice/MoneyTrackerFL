@@ -494,3 +494,72 @@ def test_recheck_matches_rows_whose_counterpart_now_exists(app, uid, login):
     assert body['remaining'] == 1
     assert client.get('/api/review/queue',
                       base_url=BASE).get_json()['total'] == 1
+
+
+# --- learning during review ----------------------------------------------
+
+def test_a_link_resolves_the_same_merchants_other_charges(app, uid, login):
+    """Link one Wolt order to "dinner"; the next Wolt order matches at once."""
+    with app.app_context():
+        first_txn = _txn(uid, 45.00, day=DAY, description='dinner')
+        _txn(uid, 62.00, day=DAY + datetime.timedelta(days=12),
+             description='dinner')
+        first = stage(uid, 45.00, merchant='wolt', dedup='w1')
+        second = stage(uid, 62.00, merchant='wolt', dedup='w2',
+                       day=DAY + datetime.timedelta(days=6))
+
+    body = login(USER).post('/api/review/link',
+                            json={'id': first, 'transaction_id': first_txn},
+                            base_url=BASE).get_json()
+
+    assert body['auto_matched'] == [second]
+    with app.app_context():
+        assert db.session.get(StagedTransaction, second).state == STAGED_MATCHED
+
+
+def test_a_linked_transaction_is_not_handed_to_an_identical_charge(app, uid,
+                                                                   login):
+    """Two ₪45 orders the same evening, one tracked: the other stays missing."""
+    with app.app_context():
+        txn = _txn(uid, 45.00, day=DAY, description='dinner')
+        first = stage(uid, 45.00, merchant='wolt', dedup='t1')
+        second = stage(uid, 45.00, merchant='wolt', dedup='t2')
+
+    body = login(USER).post('/api/review/link',
+                            json={'id': first, 'transaction_id': txn},
+                            base_url=BASE).get_json()
+
+    assert body['auto_matched'] == []
+    assert [u['id'] for u in body['updated']] == [second]
+    with app.app_context():
+        assert db.session.get(StagedTransaction, second).state == STAGED_PROPOSED
+
+
+def test_a_confirm_updates_the_suggestion_for_the_same_merchant(app, uid,
+                                                                login):
+    with app.app_context():
+        first = stage(uid, 45.00, merchant='wolt', dedup='c1',
+                      suggested_category=None)
+        second = stage(uid, 62.00, merchant='wolt', dedup='c2',
+                       suggested_category=None)
+
+    body = login(USER).post('/api/review/confirm', json={'items': [{
+        'id': first, 'category': 'zzEatingOut', 'description': 'dinner',
+    }]}, base_url=BASE).get_json()
+
+    updated = {u['id']: u for u in body['updated']}
+    assert updated[second]['suggested_category'] == 'zzEatingOut'
+    assert updated[second]['suggested_description'] == 'dinner'
+
+
+def test_a_link_teaches_the_category_for_future_charges(app, uid, login):
+    with app.app_context():
+        txn = _txn(uid, 45.00, description='dinner')
+        sid = stage(uid, 45.00, merchant='wolt', dedup='l1')
+
+    login(USER).post('/api/review/link',
+                     json={'id': sid, 'transaction_id': txn}, base_url=BASE)
+
+    with app.app_context():
+        rule = MerchantRule.query.filter_by(user_id=uid, pattern='wolt').one()
+        assert (rule.category, rule.description) == ('zzGroceries', 'dinner')
