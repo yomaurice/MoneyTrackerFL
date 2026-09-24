@@ -185,14 +185,28 @@ def match_concept(merchant_clean, memo=None):
     return None
 
 
-def _user_categories(user_id, txn_type):
-    rows = Category.query.filter_by(user_id=user_id).all()
+def load_context(user_id):
+    """The rules and categories suggest() reads, fetched once for a batch."""
+    return {
+        'rules': (
+            MerchantRule.query
+            .filter_by(user_id=user_id)
+            .order_by(MerchantRule.hits.desc())
+            .all()
+        ),
+        'categories': Category.query.filter_by(user_id=user_id).all(),
+    }
+
+
+def _user_categories(user_id, txn_type, rows=None):
+    if rows is None:
+        rows = Category.query.filter_by(user_id=user_id).all()
     # `type` is nullable on legacy rows, so treat a missing type as usable
     # rather than hiding the user's own categories from them.
     return [r for r in rows if not r.type or not txn_type or r.type == txn_type]
 
 
-def resolve_concept_to_category(user_id, concept, txn_type):
+def resolve_concept_to_category(user_id, concept, txn_type, categories=None):
     """Map a concept onto one of *this user's* categories, or None.
 
     Never invents a category. A guess the user does not use is worse than no
@@ -201,7 +215,8 @@ def resolve_concept_to_category(user_id, concept, txn_type):
     if not concept:
         return None
 
-    names = [c.name for c in _user_categories(user_id, txn_type) if c.name]
+    names = [c.name for c in _user_categories(user_id, txn_type, categories)
+             if c.name]
     if not names:
         return None
 
@@ -225,18 +240,19 @@ def resolve_concept_to_category(user_id, concept, txn_type):
     return None
 
 
-def _rule_for(user_id, merchant_clean, memo):
+def _rule_for(user_id, merchant_clean, memo, rules=None):
     """The learned rule that best fits, preferring the most-used one."""
     haystack = f'{normalize(merchant_clean)} {normalize(memo)}'.strip()
     if not haystack:
         return None
 
-    rules = (
-        MerchantRule.query
-        .filter_by(user_id=user_id)
-        .order_by(MerchantRule.hits.desc())
-        .all()
-    )
+    if rules is None:
+        rules = (
+            MerchantRule.query
+            .filter_by(user_id=user_id)
+            .order_by(MerchantRule.hits.desc())
+            .all()
+        )
 
     for rule in rules:
         if not rule.pattern:
@@ -253,14 +269,16 @@ def _rule_for(user_id, merchant_clean, memo):
     return None
 
 
-def suggest(user_id, merchant_raw, memo=None, txn_type=None):
+def suggest(user_id, merchant_raw, memo=None, txn_type=None, context=None):
     """Suggest (category, description, confidence) for a staged row.
 
     Both fields stay editable in the wizard; this only decides the default.
+    `context` is load_context()'s result, so a batch reads rules once.
     """
     merchant_clean = clean_merchant(merchant_raw)
+    context = context or {}
 
-    rule = _rule_for(user_id, merchant_clean, memo)
+    rule = _rule_for(user_id, merchant_clean, memo, context.get('rules'))
     if rule is not None:
         return {
             'merchant_clean': merchant_clean,
@@ -271,7 +289,8 @@ def suggest(user_id, merchant_raw, memo=None, txn_type=None):
         }
 
     concept = match_concept(merchant_clean, memo)
-    category = resolve_concept_to_category(user_id, concept, txn_type)
+    category = resolve_concept_to_category(user_id, concept, txn_type,
+                                           context.get('categories'))
 
     return {
         'merchant_clean': merchant_clean,

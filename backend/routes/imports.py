@@ -147,6 +147,12 @@ def upload_statement():
         if state in (STAGED_PROPOSED, STAGED_AMBIGUOUS)
     }
     refreshed = []
+    # Fetched in one query rather than one per colliding row.
+    refreshable_rows = {
+        r.id: r for r in StagedTransaction.query.filter(
+            StagedTransaction.id.in_(refreshable)
+        ).all()
+    } if refreshable else {}
 
     staged_rows, duplicates = [], 0
     for row in rows:
@@ -163,7 +169,7 @@ def upload_statement():
             row_id = seen[dedup][0]
             if row_id in refreshable:
                 refreshable.discard(row_id)
-                existing = db.session.get(StagedTransaction, row_id)
+                existing = refreshable_rows[row_id]
                 existing.merchant_raw = row.get('merchant_raw')
                 existing.merchant_clean = row.get('merchant_clean')
                 existing.memo = row.get('memo')
@@ -197,9 +203,9 @@ def upload_statement():
             installment_total=row.get('installment_total'),
         ))
 
-    db.session.add_all(staged_rows)
-    db.session.flush()
-
+    # Added to the session only after reconciling, so each new row is written
+    # once, verdict included, instead of an INSERT now and an UPDATE per row
+    # later -- a round trip each on the free tier.
     try:
         counts = reconcile.reconcile_batch(
             staged_rows + refreshed,
@@ -215,6 +221,7 @@ def upload_statement():
             'batch': _serialise_batch(batch),
         }), 500
 
+    db.session.add_all(staged_rows)
     batch.new = len(staged_rows)
     batch.matched = counts['matched']
     batch.proposed = counts['proposed']

@@ -475,3 +475,29 @@ def test_a_404_still_says_what_went_wrong(app, uid, login):
     res = login(USER).delete('/api/import-batches/99999999', base_url=BASE)
     assert res.status_code == 404
     assert 'not found' in res.get_json()['message'].lower()
+
+
+def test_upload_query_count_does_not_grow_with_the_file(app, uid, login):
+    """A per-row query timed out an 84-row statement behind the proxy."""
+    from sqlalchemy import event
+
+    def rows(n, day):
+        return [['תאריך עסקה', 'שם בית עסק', 'סכום חיוב']] + [
+            [f'{day:02d}/04/2026', f'shop {i}', f'{10 + i}.00'] for i in range(n)
+        ]
+
+    client = login(USER)
+    counts = []
+    with app.app_context():
+        engine = db.engine
+    for n, day in ((3, 1), (40, 15)):
+        seen = []
+        listener = lambda *a, **k: seen.append(1)  # noqa: E731
+        event.listen(engine, 'before_cursor_execute', listener)
+        try:
+            assert upload(client, rows=rows(n, day)).status_code == 201
+        finally:
+            event.remove(engine, 'before_cursor_execute', listener)
+        counts.append(len(seen))
+
+    assert counts[1] <= counts[0] + 2, counts

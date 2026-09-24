@@ -260,14 +260,23 @@ def learned_aliases(user_id, merchant):
     paired with the user's "phone bill", every later month recognises it by
     name even though the two strings share nothing.
     """
-    from models import STAGED_CONFIRMED, StagedTransaction
-
     key = categorize.clean_merchant(merchant)
     if not key:
         return frozenset()
+    return learned_aliases_many(user_id, {key}).get(key, frozenset())
+
+
+def learned_aliases_many(user_id, keys):
+    """learned_aliases for many cleaned merchant names, in one query."""
+    from models import STAGED_CONFIRMED, StagedTransaction
+
+    keys = {k for k in keys if k}
+    if not keys:
+        return {}
 
     rows = (
-        db.session.query(Transaction.description)
+        db.session.query(StagedTransaction.merchant_clean,
+                         Transaction.description)
         .join(
             StagedTransaction,
             db.or_(
@@ -277,7 +286,7 @@ def learned_aliases(user_id, merchant):
         )
         .filter(
             StagedTransaction.user_id == user_id,
-            StagedTransaction.merchant_clean == key,
+            StagedTransaction.merchant_clean.in_(keys),
             db.or_(
                 StagedTransaction.state == STAGED_CONFIRMED,
                 db.and_(
@@ -288,7 +297,11 @@ def learned_aliases(user_id, merchant):
         )
         .all()
     )
-    return frozenset(categorize.normalize(d) for (d,) in rows if d)
+    found = {key: set() for key in keys}
+    for merchant, description in rows:
+        if description:
+            found[merchant].add(categorize.normalize(description))
+    return {key: frozenset(v) for key, v in found.items()}
 
 
 def score_candidate(staged, txn, aliases=frozenset()):
@@ -303,10 +316,40 @@ def score_candidate(staged, txn, aliases=frozenset()):
     return round(max(0.0, min(1.0, amount + date + name)), 4)
 
 
-def find_candidates(staged, claimed_ids=()):
+def load_candidate_pool(user_id, staged_rows):
+    """Every transaction any row in a batch could match, in one query.
+
+    One round trip per batch instead of one per row. On the free tier the
+    database is a network hop away, and an 84-row statement at several queries
+    a row ran long enough for the proxy in front of the API to give up.
+    """
+    dates = [r.txn_date for r in staged_rows if r.txn_date]
+    if not dates:
+        return []
+    slack = datetime.timedelta(days=DATE_SLACK_DAYS)
+    return Transaction.query.filter(
+        Transaction.user_id == user_id,
+        Transaction.date >= min(dates) - slack,
+        Transaction.date <= max(dates) + slack,
+    ).all()
+
+
+def _is_candidate(staged, txn, low, high, tolerance):
+    return (
+        txn.user_id == staged.user_id
+        and txn.date is not None and low <= txn.date <= high
+        and txn.amount is not None
+        and abs(float(txn.amount) - float(staged.amount)) <= tolerance
+        and (not staged.type or txn.type == staged.type)
+        and (not staged.currency or txn.currency == staged.currency)
+    )
+
+
+def find_candidates(staged, claimed_ids=(), pool=None):
     """Tracked transactions that could plausibly be this staged row.
 
-    Filtered in SQL first so a long history does not get pulled into memory.
+    Filtered in SQL so a long history does not get pulled into memory, or,
+    when a batch has already fetched its `pool`, filtered from that.
     """
     if staged.amount is None or staged.txn_date is None:
         return []
@@ -315,6 +358,13 @@ def find_candidates(staged, claimed_ids=()):
 
     low = staged.txn_date - datetime.timedelta(days=DATE_SLACK_DAYS)
     high = staged.txn_date + datetime.timedelta(days=DATE_SLACK_DAYS)
+
+    if pool is not None:
+        return [
+            t for t in pool
+            if t.id not in claimed_ids
+            and _is_candidate(staged, t, low, high, tolerance)
+        ]
 
     query = Transaction.query.filter(
         Transaction.user_id == staged.user_id,
@@ -333,7 +383,7 @@ def find_candidates(staged, claimed_ids=()):
 
 
 def reconcile_row(staged, claimed_ids=None, exclude_patterns=None,
-                  profile_kind=None, alias_cache=None):
+                  profile_kind=None, alias_cache=None, pool=None):
     """Decide one staged row's verdict in place. Caller commits.
 
     `claimed_ids` is carried across a run so two staged rows cannot both claim
@@ -367,7 +417,7 @@ def reconcile_row(staged, claimed_ids=None, exclude_patterns=None,
     if key not in cache:
         cache[key] = learned_aliases(staged.user_id, merchant)
 
-    candidates = find_candidates(staged, claimed)
+    candidates = find_candidates(staged, claimed, pool=pool)
     scored = sorted(
         ((score_candidate(staged, t, cache[key]), t) for t in candidates),
         key=lambda pair: pair[0],
@@ -438,37 +488,61 @@ def reconcile_batch(staged_rows, profile_kind=None, exclude_patterns=None,
         'suppressed': 0,
     }
 
-    for staged in staged_rows:
-        reconcile_row(
-            staged,
-            claimed_ids=claimed,
-            exclude_patterns=exclude_patterns,
-            profile_kind=profile_kind,
-            alias_cache=aliases,
-        )
+    # Everything the loop reads is fetched up front, per user: candidates,
+    # learned names, merchant rules and categories. Without this a statement
+    # cost several queries a row, and autoflush turned each new row into an
+    # INSERT followed by an UPDATE.
+    pools, contexts = {}, {}
+    for user_id in {r.user_id for r in staged_rows}:
+        mine = [r for r in staged_rows if r.user_id == user_id]
+        pools[user_id] = load_candidate_pool(user_id, mine)
+        contexts[user_id] = categorize.load_context(user_id)
+        aliases.update(learned_aliases_many(user_id, {
+            categorize.clean_merchant(r.merchant_clean or r.merchant_raw)
+            for r in mine
+        }))
 
-        if apply_suggestions and staged.state in (
-            STAGED_PROPOSED, STAGED_AMBIGUOUS
-        ):
-            guess = categorize.suggest(
-                staged.user_id,
-                staged.merchant_raw,
-                staged.memo,
-                staged.type,
-            )
-            staged.merchant_clean = guess['merchant_clean']
-            staged.suggested_category = guess['category']
-            staged.suggested_description = guess['description']
-            staged.category_confidence = guess['confidence']
-
-        if staged.state == STAGED_MATCHED:
-            counts['matched'] += 1
-        elif staged.state == STAGED_PROPOSED:
-            counts['proposed'] += 1
-        elif staged.state == STAGED_AMBIGUOUS:
-            counts['ambiguous'] += 1
-        elif staged.state == STAGED_IGNORED:
-            counts['suppressed'] += 1
+    with db.session.no_autoflush:
+        for staged in staged_rows:
+            _reconcile_one(staged, claimed, exclude_patterns, profile_kind,
+                           aliases, pools[staged.user_id],
+                           contexts[staged.user_id], apply_suggestions, counts)
 
     db.session.flush()
     return counts
+
+
+def _reconcile_one(staged, claimed, exclude_patterns, profile_kind, aliases,
+                   pool, context, apply_suggestions, counts):
+    reconcile_row(
+        staged,
+        claimed_ids=claimed,
+        exclude_patterns=exclude_patterns,
+        profile_kind=profile_kind,
+        alias_cache=aliases,
+        pool=pool,
+    )
+
+    if apply_suggestions and staged.state in (
+        STAGED_PROPOSED, STAGED_AMBIGUOUS
+    ):
+        guess = categorize.suggest(
+            staged.user_id,
+            staged.merchant_raw,
+            staged.memo,
+            staged.type,
+            context=context,
+        )
+        staged.merchant_clean = guess['merchant_clean']
+        staged.suggested_category = guess['category']
+        staged.suggested_description = guess['description']
+        staged.category_confidence = guess['confidence']
+
+    if staged.state == STAGED_MATCHED:
+        counts['matched'] += 1
+    elif staged.state == STAGED_PROPOSED:
+        counts['proposed'] += 1
+    elif staged.state == STAGED_AMBIGUOUS:
+        counts['ambiguous'] += 1
+    elif staged.state == STAGED_IGNORED:
+        counts['suppressed'] += 1
