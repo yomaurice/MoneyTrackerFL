@@ -82,6 +82,7 @@ from routes.review import review_bp  # noqa: E402
 from routes.source_profiles import source_profiles_bp  # noqa: E402
 from routes.imports import imports_bp  # noqa: E402
 from routes.transactions_search import transactions_search_bp  # noqa: E402
+from routes.ingest import ingest_bp  # noqa: E402
 from services.validation import (  # noqa: E402
     ValidationError,
     validate_recurrence_months,
@@ -94,6 +95,7 @@ app.register_blueprint(review_bp)
 app.register_blueprint(source_profiles_bp)
 app.register_blueprint(imports_bp)
 app.register_blueprint(transactions_search_bp)
+app.register_blueprint(ingest_bp)
 
 # Statements are small. Flask rejects anything larger before it reaches a view,
 # so an oversized upload cannot occupy memory on the 512MB free tier.
