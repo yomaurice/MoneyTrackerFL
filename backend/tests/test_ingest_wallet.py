@@ -193,3 +193,24 @@ def test_rows_stay_with_their_owner(app, uid, login, make_user):
     assert confirm(login(USER)).status_code == 201
     with app.app_context():
         assert StagedTransaction.query.filter_by(user_id=uid).count() == 1
+
+
+def test_the_send_accepts_query_parameters(app, uid, login):
+    """What the phone setup uses: MacroDroid's Query Params rows."""
+    token = token_for(login)
+    res = app.test_client().post(
+        '/api/ingest/wallet', query_string=NOTE, base_url=BASE,
+        headers={'Authorization': f'Bearer {token}'},
+    )
+    assert res.status_code == 201
+    with app.app_context():
+        row = StagedTransaction.query.filter_by(user_id=uid).one()
+        assert (row.amount, row.merchant_raw) == (52.9, 'שופרסל דיל')
+
+
+def test_a_millisecond_timestamp_dates_the_charge(app, uid, login):
+    """{not_timestamp} is milliseconds since the epoch."""
+    send(app, token_for(login), {**NOTE, 'ts': '1790000000000'})
+    with app.app_context():
+        row = StagedTransaction.query.filter_by(user_id=uid).one()
+        assert row.txn_date == datetime.date(2026, 9, 21)

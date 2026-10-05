@@ -113,9 +113,18 @@ def _staged_for(user_id, title, text, ts):
 @ingest_bp.route('/ingest/wallet', methods=['POST'])
 @token_required
 def ingest_wallet():
-    """Stage a payment notification for review. Token auth; stages only."""
+    """Stage a payment notification for review. Token auth; stages only.
+
+    Takes title / text / ts as a JSON body, a form, or query parameters. The
+    phone setup uses query parameters: MacroDroid's key/value rows encode each
+    value properly, where a hand-typed JSON body breaks on the first quote or
+    line break inside a notification.
+    """
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        body = {**request.form.to_dict(), **request.args.to_dict()}
     try:
-        title, text, ts = _read_notification(request.get_json(silent=True))
+        title, text, ts = _read_notification(body)
     except ValueError as exc:
         return jsonify({'message': str(exc)}), 400
 
