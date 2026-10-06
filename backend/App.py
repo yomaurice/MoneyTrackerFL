@@ -81,13 +81,22 @@ from routes.transactions_bulk import transactions_bulk_bp  # noqa: E402
 from routes.review import review_bp  # noqa: E402
 from routes.source_profiles import source_profiles_bp  # noqa: E402
 from routes.imports import imports_bp  # noqa: E402
+from routes.transactions_search import transactions_search_bp  # noqa: E402
+from routes.ingest import ingest_bp  # noqa: E402
 from routes.chat import chat_bp  # noqa: E402
+from services.validation import (  # noqa: E402
+    ValidationError,
+    validate_recurrence_months,
+    validate_transaction,
+)
 
 app.register_blueprint(tokens_bp)
 app.register_blueprint(transactions_bulk_bp)
 app.register_blueprint(review_bp)
 app.register_blueprint(source_profiles_bp)
 app.register_blueprint(imports_bp)
+app.register_blueprint(transactions_search_bp)
+app.register_blueprint(ingest_bp)
 app.register_blueprint(chat_bp)
 
 # Statements are small. Flask rejects anything larger before it reaches a view,
@@ -249,27 +258,38 @@ def get_categories(type):
 @login_required
 def add_transaction():
     user_id = g.user_id
-    data = request.json
-    start_date = datetime.datetime.strptime(data.get('date'), '%Y-%m-%d')
-    recurrence_months = int(data.get('recurrence_months', 1)) if data.get('is_recurring') else 1
+    data = request.get_json(silent=True)
 
-    transaction_ids = []
-
-    for i in range(recurrence_months):
-        transaction_date = start_date + relativedelta(months=i)
-        tx = Transaction(
-            type=data['type'],
-            category=data['category'],
-            amount=float(data['amount']),
-            description=data.get('description', ''),
-            date=transaction_date.date(),
-            user_id=user_id,
-            currency=data.get('currency', 'ILS'),
-            exchange_rate=float(data.get('exchange_rate', 1.0))
+    # Through the same validator as the bulk and review paths. Before this a
+    # missing field raised KeyError into the 500 handler, and nothing capped
+    # how many months one request could fan out into.
+    try:
+        row = validate_transaction(data)
+        recurrence_months = (
+            validate_recurrence_months(data.get('recurrence_months'))
+            if data.get('is_recurring') else 1
         )
-        db.session.add(tx)
-        db.session.flush()
-        transaction_ids.append(tx.id)
+    except ValidationError as exc:
+        return jsonify({'error': str(exc)}), 400
+    recurrence_months = max(1, recurrence_months)
+
+    created = [
+        Transaction(
+            type=row['type'],
+            category=row['category'],
+            amount=row['amount'],
+            description=row['description'] or '',
+            date=row['date'] + relativedelta(months=i),
+            user_id=user_id,
+            currency=row['currency'],
+            exchange_rate=row['exchange_rate'],
+        )
+        for i in range(recurrence_months)
+    ]
+    db.session.add_all(created)
+    # One flush for the ids, rather than one round trip per month.
+    db.session.flush()
+    transaction_ids = [tx.id for tx in created]
 
     db.session.commit()
 
@@ -378,15 +398,26 @@ def update_transaction(transaction_id):
     tx = Transaction.query.filter_by(id=transaction_id, user_id=user_id).first()
     if not tx:
         return jsonify({'error': 'Transaction not found'}), 404
+    if not isinstance(data, dict):
+        return jsonify({'error': 'expected a JSON object'}), 400
 
-    tx.type = data['type']
-    tx.category = data['category']
-    tx.amount = float(data['amount'])
-    tx.description = data.get('description', '')
-    tx.date = datetime.datetime.strptime(data['date'], '%Y-%m-%d').date()
-    tx.user_id = user_id
-    tx.currency = data.get('currency', tx.currency or 'ILS')
-    tx.exchange_rate = float(data.get('exchange_rate', tx.exchange_rate or 1.0))
+    # Fields the edit form leaves out keep their stored value, as before.
+    try:
+        row = validate_transaction({
+            'currency': tx.currency or 'ILS',
+            'exchange_rate': tx.exchange_rate or 1.0,
+            **data,
+        })
+    except ValidationError as exc:
+        return jsonify({'error': str(exc)}), 400
+
+    tx.type = row['type']
+    tx.category = row['category']
+    tx.amount = row['amount']
+    tx.description = row['description'] or ''
+    tx.date = row['date']
+    tx.currency = row['currency']
+    tx.exchange_rate = row['exchange_rate']
 
     db.session.commit()
     return jsonify({'message': 'Transaction updated successfully'})
@@ -447,10 +478,15 @@ def delete_category(name):
 
     return jsonify({'message': 'Category not found'}), 404
 
-@app.route("/years", methods=["GET"])
+@app.route('/api/analytics/years', methods=['GET'])
+@login_required
 def get_years_with_data():
+    # Was GET /years: no login and no user filter, so it listed the years of
+    # *every* user's data. The dashboard already called this path and fell
+    # back to deriving years itself when it 404'd.
     years = (
         db.session.query(db.extract('year', Transaction.date).label('year'))
+        .filter(Transaction.user_id == g.user_id)
         .group_by('year')
         .order_by('year')
         .all()

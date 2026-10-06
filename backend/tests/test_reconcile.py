@@ -244,11 +244,109 @@ def test_foreign_currency_tolerates_a_rate_difference(app, uid):
         db.session.rollback()
 
 
-def test_shekel_amounts_are_matched_exactly(app, uid):
-    """No rate is involved in ILS, so a 1.50 gap is a different charge."""
+def test_a_near_amount_with_the_same_name_is_matched(app, uid):
+    """Within 2 units is a medium signal; a matching name tips it over."""
+    with app.app_context():
+        txn = add_txn(uid, 100.00, description='שופרסל דיל')
+        row = staged(uid, 101.50)
+        reconcile.reconcile_row(row)
+        assert row.state == STAGED_MATCHED
+        assert row.matched_txn_id == txn.id
+        db.session.rollback()
+
+
+def test_a_near_amount_alone_is_offered_not_decided(app, uid):
+    with app.app_context():
+        txn = add_txn(uid, 100.00, description='dinner with friends')
+        row = staged(uid, 101.50)
+        reconcile.reconcile_row(row)
+        assert row.state == STAGED_PROPOSED
+        assert row.candidate_ids == [txn.id]
+        db.session.rollback()
+
+
+def test_more_than_two_units_off_is_not_a_candidate(app, uid):
     with app.app_context():
         add_txn(uid, 100.00, description='שופרסל דיל')
-        row = staged(uid, 101.50)
+        row = staged(uid, 102.50)
+        reconcile.reconcile_row(row)
+        assert row.state == STAGED_PROPOSED
+        assert row.candidate_ids is None
+        db.session.rollback()
+
+
+def test_an_exact_amount_matches_despite_an_unrelated_description(app, uid):
+    """The user's own wording rarely resembles the issuer's merchant string."""
+    with app.app_context():
+        txn = add_txn(uid, 52.90, day=DAY - datetime.timedelta(days=3),
+                      description='groceries for the week')
+        row = staged(uid, 52.90)
+        reconcile.reconcile_row(row)
+        assert row.state == STAGED_MATCHED
+        assert row.matched_txn_id == txn.id
+        db.session.rollback()
+
+
+def test_a_missing_merchant_does_not_count_against_a_match(app, uid):
+    with app.app_context():
+        txn = add_txn(uid, 52.90, day=DAY - datetime.timedelta(days=5),
+                      description='groceries')
+        row = staged(uid, 52.90, merchant=None)
+        reconcile.reconcile_row(row)
+        assert row.state == STAGED_MATCHED
+        assert row.matched_txn_id == txn.id
+        db.session.rollback()
+
+
+# --- learning repeating charges ------------------------------------------
+
+def _past_pairing(uid, merchant, description, state, score=None):
+    from models import STAGED_CONFIRMED
+    past_day = DAY - datetime.timedelta(days=31)
+    txn = add_txn(uid, 89.90, day=past_day, description=description)
+    row = staged(uid, 89.90, day=past_day, merchant=merchant,
+                 dedup_hash=f'past-{state}-{score}')
+    row.state = state
+    if state == STAGED_CONFIRMED:
+        row.created_txn_id = txn.id
+    else:
+        row.matched_txn_id = txn.id
+        row.match_score = score
+    db.session.flush()
+
+
+def test_a_pairing_from_last_month_is_remembered(app, uid):
+    """A monthly bill is recognised by name once it has been paired once."""
+    from models import STAGED_CONFIRMED
+    with app.app_context():
+        _past_pairing(uid, 'hot mobile', 'phone bill', STAGED_CONFIRMED)
+        txn = add_txn(uid, 89.90, day=DAY - datetime.timedelta(days=8),
+                      description='phone bill')
+        row = staged(uid, 89.90, merchant='hot mobile')
+        reconcile.reconcile_row(row)
+        assert row.state == STAGED_MATCHED
+        assert row.matched_txn_id == txn.id
+        db.session.rollback()
+
+
+def test_without_the_memory_the_same_pair_is_only_offered(app, uid):
+    with app.app_context():
+        add_txn(uid, 89.90, day=DAY - datetime.timedelta(days=8),
+                description='phone bill')
+        row = staged(uid, 89.90, merchant='hot mobile')
+        reconcile.reconcile_row(row)
+        assert row.state == STAGED_PROPOSED
+        db.session.rollback()
+
+
+def test_a_shaky_auto_match_teaches_nothing(app, uid):
+    """Otherwise one wrong guess would reinforce itself every month."""
+    with app.app_context():
+        _past_pairing(uid, 'hot mobile', 'phone bill', STAGED_MATCHED,
+                      score=0.72)
+        add_txn(uid, 89.90, day=DAY - datetime.timedelta(days=8),
+                description='phone bill')
+        row = staged(uid, 89.90, merchant='hot mobile')
         reconcile.reconcile_row(row)
         assert row.state == STAGED_PROPOSED
         db.session.rollback()

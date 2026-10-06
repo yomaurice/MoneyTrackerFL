@@ -1,0 +1,59 @@
+{
+  "_comment": "Shared by tests/test_wallet_parse.py and MoneyTracker_frontend/scripts/check-wallet-parse.ts, so the server and the /add page read a notification the same way. The exact Google Wallet wording is assumed from common formats -- add real notifications here as they turn up.",
+  "cases": [
+    {
+      "name": "merchant as title, shekel sign first, card in text",
+      "title": "שופרסל דיל",
+      "text": "‏₪52.90 עם Visa ‏•••• 1234",
+      "expect": {"amount": 52.9, "currency": "ILS", "merchant": "שופרסל דיל", "type": "expense"}
+    },
+    {
+      "name": "English, thousands separator",
+      "title": "SHUFERSAL",
+      "text": "₪1,234.50 with Mastercard •••• 9876",
+      "expect": {"amount": 1234.5, "currency": "ILS", "merchant": "SHUFERSAL", "type": "expense"}
+    },
+    {
+      "name": "generic title, merchant after 'at'",
+      "title": "Google Wallet",
+      "text": "You paid ₪18.00 at Aroma Espresso Bar",
+      "expect": {"amount": 18.0, "currency": "ILS", "merchant": "Aroma Espresso Bar", "type": "expense"}
+    },
+    {
+      "name": "Hebrew, sign after the amount, merchant after ב-",
+      "title": "ארנק Google",
+      "text": "שילמת 45.00 ₪ ב-וולט",
+      "expect": {"amount": 45.0, "currency": "ILS", "merchant": "וולט", "type": "expense"}
+    },
+    {
+      "name": "ש\"ח as the currency",
+      "title": "רמי לוי",
+      "text": "חיוב של 230 ש\"ח בכרטיס המסתיים ב-1234",
+      "expect": {"amount": 230.0, "currency": "ILS", "merchant": "רמי לוי", "type": "expense"}
+    },
+    {
+      "name": "dollars",
+      "title": "Amazon",
+      "text": "$12.99 with Visa •••• 1234",
+      "expect": {"amount": 12.99, "currency": "USD", "merchant": "Amazon", "type": "expense"}
+    },
+    {
+      "name": "euros, comma decimal",
+      "title": "Café de Flore",
+      "text": "€4,50",
+      "expect": {"amount": 4.5, "currency": "EUR", "merchant": "Café de Flore", "type": "expense"}
+    },
+    {
+      "name": "a refund is income",
+      "title": "ZARA",
+      "text": "החזר של ₪199.90 לכרטיס Visa",
+      "expect": {"amount": 199.9, "currency": "ILS", "merchant": "ZARA", "type": "income"}
+    },
+    {
+      "name": "not a payment",
+      "title": "Google Wallet",
+      "text": "Your card is ready to use",
+      "expect": {"amount": null, "currency": null, "merchant": null, "type": "expense"}
+    }
+  ]
+}
