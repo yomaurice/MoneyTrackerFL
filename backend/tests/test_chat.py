@@ -198,14 +198,51 @@ def test_chat_passes_history_through(app, uid, login, gemini):
     assert roles == ['user', 'model', 'user']
 
 
-def test_chat_stops_after_max_steps(app, uid, login, gemini):
-    gemini(*[_turn([_call('list_categories')])] * chat_route.MAX_STEPS)
+class RecordingFake(FakeGemini):
+    def generate_content(self, model, contents, config):
+        self.configs = getattr(self, 'configs', []) + [config]
+        return super().generate_content(model, contents, config)
+
+
+def test_last_step_must_answer_without_tools(app, uid, login, monkeypatch):
+    monkeypatch.setenv('GEMINI_API_KEY', 'test-key')
+    turns = [_turn([_call('list_categories')])] * (chat_route.MAX_STEPS - 1)
+    fake = RecordingFake(turns + [_turn(text='best effort')])
+    monkeypatch.setattr(chat_route, '_client', fake)
 
     res = login(USER).post('/api/chat', json={'question': 'loop'},
                            base_url=BASE)
 
-    assert res.status_code == 200
-    assert 'too many lookups' in res.get_json()['answer']
+    assert res.get_json()['answer'] == 'best effort'
+    has_tools = [bool(c.tools) for c in fake.configs]
+    assert has_tools == [True] * (chat_route.MAX_STEPS - 1) + [False]
+    last_turn = fake.requests[-1][-1]
+    assert last_turn.parts[-1].text == chat_route.FINAL_NUDGE
+
+
+def test_categories_are_given_to_the_model_up_front(app, uid, login,
+                                                    monkeypatch):
+    monkeypatch.setenv('GEMINI_API_KEY', 'test-key')
+    with app.app_context():
+        add(uid, 50, 'zzFuel')
+    fake = RecordingFake([_turn(text='ok')])
+    monkeypatch.setattr(chat_route, '_client', fake)
+
+    login(USER).post('/api/chat', json={'question': 'hi'}, base_url=BASE)
+
+    assert '- zzFuel (expense, 1)' in fake.configs[0].system_instruction
+
+
+def test_chat_stops_when_the_budget_runs_out(app, uid, login, gemini,
+                                             monkeypatch):
+    monkeypatch.setattr(chat_route, 'ANSWER_BUDGET_S', 1)
+    fake = gemini(_turn(text='never asked'))
+
+    res = login(USER).post('/api/chat', json={'question': 'slow'},
+                           base_url=BASE)
+
+    assert 'took too long' in res.get_json()['answer']
+    assert fake.requests == []
 
 
 def _busy():
@@ -228,7 +265,7 @@ def test_chat_falls_back_when_the_main_model_is_busy(app, uid, login,
                                                      monkeypatch):
     monkeypatch.setenv('GEMINI_API_KEY', 'test-key')
     monkeypatch.delenv('GEMINI_MODEL', raising=False)
-    monkeypatch.delenv('GEMINI_FALLBACK_MODEL', raising=False)
+    monkeypatch.setenv('GEMINI_FALLBACK_MODEL', 'some-other-model')
     fake = BusyThenFake([_turn(text='from the fallback')])
     monkeypatch.setattr(chat_route, '_client', fake)
 
@@ -237,7 +274,7 @@ def test_chat_falls_back_when_the_main_model_is_busy(app, uid, login,
 
     assert res.get_json()['answer'] == 'from the fallback'
     assert [m for m, _ in fake.requests] == [
-        chat_route.DEFAULT_MODEL, chat_route.DEFAULT_FALLBACK_MODEL]
+        chat_route.DEFAULT_MODEL, 'some-other-model']
 
 
 def test_chat_reports_busy_when_every_model_is(app, uid, login, monkeypatch):

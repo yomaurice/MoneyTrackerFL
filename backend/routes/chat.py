@@ -5,12 +5,13 @@ services/chat_tools.py, which are pinned to the logged-in user, and this module
 runs that loop. Conversation history lives in the browser and is sent with
 each question; nothing about a chat is stored here.
 
-GEMINI_API_KEY must be set. GEMINI_MODEL and GEMINI_FALLBACK_MODEL override
-the models.
+GEMINI_API_KEY must be set. GEMINI_MODEL overrides the model;
+GEMINI_FALLBACK_MODEL adds one to try when it is busy.
 """
 import datetime
 import logging
 import os
+import time
 
 from flask import Blueprint, g, jsonify, request
 
@@ -19,13 +20,24 @@ from services import chat_tools
 
 chat_bp = Blueprint('chat', __name__, url_prefix='/api/chat')
 
-DEFAULT_MODEL = 'gemini-flash-latest'
-# The free tier's main model regularly answers 503 "high demand". The lite
-# model is usually free when it is not, and handles these questions well.
-DEFAULT_FALLBACK_MODEL = 'gemini-flash-lite-latest'
-# Per model call. A normal step takes a few seconds; a busy model can hang for
-# a minute before answering 504.
-REQUEST_TIMEOUT_MS = 30_000
+# Measured on the free tier (2026-10): gemini-flash-latest spends ~14s
+# thinking per step and often answers 503/504 after 20-60s, so a three-step
+# question cannot finish inside a web request. The lite model answers most
+# steps in under a second and gets these questions right once the tools do
+# the arithmetic. A fallback model is only used if GEMINI_FALLBACK_MODEL is set.
+DEFAULT_MODEL = 'gemini-flash-lite-latest'
+# The whole question, every model call included. Must stay under gunicorn's
+# --timeout in the Procfile, or the worker is killed mid-answer and the
+# browser gets a bare 502.
+ANSWER_BUDGET_S = 50
+# Time held back for the last call, which must answer instead of looking up
+# more. Most lite steps take under a second, but one in a few takes 7-18s.
+FINAL_STEP_RESERVE_S = 15
+# Sent with the last call, which has no tools. Gemini ignores the
+# function-calling mode NONE and keeps asking for lookups, so the tools are
+# taken away instead and it is told why.
+FINAL_NUDGE = ('No more lookups are possible. Answer now from the results '
+               'above, and say plainly if something could not be found.')
 # Each step is one model call; a question normally needs two to four. The cap
 # stops a confused model from burning through the free tier's daily quota.
 MAX_STEPS = 8
@@ -37,8 +49,13 @@ SYSTEM_PROMPT = """\
 You answer questions about the user's personal finances in the MoneyTracker app.
 Today is {today}.
 
-Use the tools to look things up; never guess amounts. Call list_categories
-first when you need to know how the user labels things. Never add, subtract
+The user's categories (name, type, number of transactions):
+{categories}
+
+Use the tools to look things up; never guess amounts. Each lookup is slow,
+so plan the fewest calls that answer the question, and answer as soon as you
+have the numbers. A search that finds nothing means there is nothing to
+find; do not retry it with other words more than once. Never add, subtract
 or average numbers yourself: every figure in your answer must come straight
 from a tool result. Use summarize for totals and compare_periods for any
 before/after comparison. Amounts are already converted to the user's main
@@ -54,7 +71,9 @@ for are not results, so do not list them as merchants you found.
 For "how much is X saving me" questions, call compare_periods on the related
 spending (such as electricity bills) for the same calendar months before and
 after the change, because bills are seasonal: months since the change this
-year against the same months a year earlier. Count any related credits or
+year against the same months a year earlier. Use whole calendar months and
+end both periods at the last complete month, because this month's bills may
+not have arrived yet. Count any related credits or
 income too. If the data shows what the change cost, state the cost alongside
 the saving rather than netting them. If you need a fact the data cannot show,
 like when something was installed, ask the user rather than assume.
@@ -72,12 +91,11 @@ def _gemini():
         from google import genai
         from google.genai import types
         # The SDK's own retries back off for minutes on a busy model, far
-        # longer than anyone waits for a chat reply. No retries here: a busy
-        # or slow call sends answer() straight to the fallback model.
+        # longer than anyone waits for a chat reply. Timeouts are set per
+        # call, from what is left of the answer's budget.
         _client = genai.Client(
             api_key=os.environ['GEMINI_API_KEY'],
             http_options=types.HttpOptions(
-                timeout=REQUEST_TIMEOUT_MS,
                 retry_options=types.HttpRetryOptions(attempts=1),
             ),
         )
@@ -102,8 +120,18 @@ def _history(raw):
     return contents
 
 
+def _category_lines(user_id):
+    # Given up front, so the model does not spend a slow step looking them up.
+    rows = chat_tools.list_categories(user_id)['categories']
+    if not rows:
+        return '(none yet)'
+    return '\n'.join(
+        f"- {r['category']} ({r['type']}, {r['transactions']})" for r in rows)
+
+
 def answer(user_id, question, history=None):
-    """Answer on the main model, or on the fallback if the main one is busy.
+    """Answer on the main model, or on the fallback if one is set and the
+    main one is busy, all within ANSWER_BUDGET_S.
 
     The fallback starts the question over rather than resuming: the tools only
     read, so repeating them is harmless, and a half-finished turn from one
@@ -112,11 +140,13 @@ def answer(user_id, question, history=None):
     import httpx
     from google.genai import errors
 
-    models = [os.environ.get('GEMINI_MODEL', DEFAULT_MODEL),
-              os.environ.get('GEMINI_FALLBACK_MODEL', DEFAULT_FALLBACK_MODEL)]
+    deadline = time.monotonic() + ANSWER_BUDGET_S
+    models = [os.environ.get('GEMINI_MODEL', DEFAULT_MODEL)]
+    if os.environ.get('GEMINI_FALLBACK_MODEL'):
+        models.append(os.environ['GEMINI_FALLBACK_MODEL'])
     for i, model in enumerate(models):
         try:
-            return _answer_with(model, user_id, question, history)
+            return _answer_with(model, user_id, question, history, deadline)
         except (errors.ServerError, errors.ClientError,
                 httpx.TimeoutException) as exc:
             busy = not isinstance(exc, errors.ClientError) or exc.code == 429
@@ -126,13 +156,14 @@ def answer(user_id, question, history=None):
                             'to %s', model, exc, models[i + 1])
 
 
-def _answer_with(model, user_id, question, history):
-    """Run the tool loop to an answer on one model."""
+def _answer_with(model, user_id, question, history, deadline):
+    """Run the tool loop to an answer on one model, before `deadline`."""
     from google.genai import types
 
     config = types.GenerateContentConfig(
         system_instruction=SYSTEM_PROMPT.format(
-            today=datetime.date.today().isoformat()),
+            today=datetime.date.today().isoformat(),
+            categories=_category_lines(user_id)),
         tools=[types.Tool(function_declarations=[
             types.FunctionDeclaration(
                 name=d['name'], description=d['description'],
@@ -147,12 +178,35 @@ def _answer_with(model, user_id, question, history):
     contents = _history(history)
     contents.append(types.Content(role='user', parts=[types.Part(text=question)]))
 
-    for _ in range(MAX_STEPS):
+    # The last call may not look anything else up, so it must answer from what
+    # it has. Without this a model that keeps searching runs out of steps or
+    # time and the user gets nothing.
+    final_config = config.model_copy(update={'tools': None})
+
+    for step in range(MAX_STEPS):
+        remaining = deadline - time.monotonic()
+        if remaining < 2:
+            break
+        final = (step == MAX_STEPS - 1
+                 or remaining < FINAL_STEP_RESERVE_S + 2)
+        if final:
+            # Rides on the last user turn (the tool results), the shape the
+            # API was checked to accept.
+            contents[-1] = types.Content(
+                role='user',
+                parts=list(contents[-1].parts) + [types.Part(text=FINAL_NUDGE)])
+        step_config = (final_config if final else config).model_copy(update={
+            'http_options': types.HttpOptions(
+                timeout=int(remaining * 1000),
+                retry_options=types.HttpRetryOptions(attempts=1)),
+        })
         response = _gemini().models.generate_content(
-            model=model, contents=contents, config=config)
+            model=model, contents=contents, config=step_config)
         calls = response.function_calls or []
         if not calls:
             return response.text or "Sorry, I couldn't come up with an answer."
+        if final:
+            break
 
         # The model turn goes back verbatim: newer Gemini models attach
         # signatures to it that the next call checks.
@@ -164,7 +218,7 @@ def _answer_with(model, user_id, question, history):
             for call in calls
         ]))
 
-    return ('That question took too many lookups. Try asking something '
+    return ('That question took too long to look up. Try asking something '
             'narrower, such as one year or one category.')
 
 
