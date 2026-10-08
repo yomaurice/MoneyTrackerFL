@@ -11,6 +11,7 @@ the models.
 import datetime
 import logging
 import os
+import time
 
 from flask import Blueprint, g, jsonify, request
 
@@ -26,6 +27,12 @@ DEFAULT_FALLBACK_MODEL = 'gemini-flash-lite-latest'
 # Per model call. A normal step takes a few seconds; a busy model can hang for
 # a minute before answering 504.
 REQUEST_TIMEOUT_MS = 30_000
+# The whole question, every step and the fallback included. Gunicorn kills a
+# worker that runs past its --timeout (120s on Render, 30s if unset) and the
+# browser then gets an empty 500, so stop well before that and say so.
+TOTAL_TIMEOUT_S = 90
+# Not worth starting a model call with less time than this left.
+MIN_CALL_S = 5
 # Each step is one model call; a question normally needs two to four. The cap
 # stops a confused model from burning through the free tier's daily quota.
 MAX_STEPS = 8
@@ -64,6 +71,10 @@ Reply in the language the user wrote in.
 """
 
 _client = None
+
+
+class OutOfTime(Exception):
+    """The question used up TOTAL_TIMEOUT_S before an answer came back."""
 
 
 def _gemini():
@@ -107,16 +118,18 @@ def answer(user_id, question, history=None):
 
     The fallback starts the question over rather than resuming: the tools only
     read, so repeating them is harmless, and a half-finished turn from one
-    model is not valid input to another.
+    model is not valid input to another. It gets only the time the main model
+    left over; both share one TOTAL_TIMEOUT_S budget.
     """
     import httpx
     from google.genai import errors
 
     models = [os.environ.get('GEMINI_MODEL', DEFAULT_MODEL),
               os.environ.get('GEMINI_FALLBACK_MODEL', DEFAULT_FALLBACK_MODEL)]
+    deadline = time.monotonic() + TOTAL_TIMEOUT_S
     for i, model in enumerate(models):
         try:
-            return _answer_with(model, user_id, question, history)
+            return _answer_with(model, user_id, question, history, deadline)
         except (errors.ServerError, errors.ClientError,
                 httpx.TimeoutException) as exc:
             busy = not isinstance(exc, errors.ClientError) or exc.code == 429
@@ -126,8 +139,8 @@ def answer(user_id, question, history=None):
                             'to %s', model, exc, models[i + 1])
 
 
-def _answer_with(model, user_id, question, history):
-    """Run the tool loop to an answer on one model."""
+def _answer_with(model, user_id, question, history, deadline):
+    """Run the tool loop to an answer on one model, or raise OutOfTime."""
     from google.genai import types
 
     config = types.GenerateContentConfig(
@@ -148,8 +161,17 @@ def _answer_with(model, user_id, question, history):
     contents.append(types.Content(role='user', parts=[types.Part(text=question)]))
 
     for _ in range(MAX_STEPS):
+        remaining = deadline - time.monotonic()
+        if remaining < MIN_CALL_S:
+            raise OutOfTime()
+        # Each call may wait only as long as the question has left. These
+        # options are merged over the client's, so its no-retry setting holds.
+        step_config = config.model_copy(update={
+            'http_options': types.HttpOptions(
+                timeout=int(min(REQUEST_TIMEOUT_MS, remaining * 1000))),
+        })
         response = _gemini().models.generate_content(
-            model=model, contents=contents, config=config)
+            model=model, contents=contents, config=step_config)
         calls = response.function_calls or []
         if not calls:
             return response.text or "Sorry, I couldn't come up with an answer."
@@ -195,7 +217,7 @@ def chat():
                            'limit was reached.'}), 429
         logging.error('Gemini rejected a chat request: %s', exc)
         return jsonify({'message': 'The assistant could not answer.'}), 502
-    except (errors.ServerError, httpx.TimeoutException) as exc:
+    except (errors.ServerError, httpx.TimeoutException, OutOfTime) as exc:
         logging.warning('Gemini unavailable: %r', exc)
         return jsonify({
             'message': 'The assistant is busy right now. Try again in a '

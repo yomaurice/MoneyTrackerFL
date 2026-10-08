@@ -271,3 +271,36 @@ def test_chat_needs_a_session(app):
     assert app.test_client().post(
         '/api/chat', json={'question': 'hi'}, base_url=BASE
     ).status_code == 401
+
+
+def test_chat_gives_up_cleanly_when_out_of_time(app, uid, login, gemini,
+                                                monkeypatch):
+    # Out of budget before the first call: a 503 the page can show, not a
+    # worker killed by gunicorn's timeout.
+    monkeypatch.setattr(chat_route, 'TOTAL_TIMEOUT_S', 0)
+    fake = gemini(_turn(text='never sent'))
+
+    res = login(USER).post('/api/chat', json={'question': 'hi'},
+                           base_url=BASE)
+
+    assert res.status_code == 503
+    assert 'busy' in res.get_json()['message']
+    assert fake.requests == []
+
+
+def test_each_call_waits_only_for_the_time_left(app, uid, login, gemini,
+                                                monkeypatch):
+    monkeypatch.setattr(chat_route, 'TOTAL_TIMEOUT_S', 12)
+    timeouts = []
+
+    class Recording(FakeGemini):
+        def generate_content(self, model, contents, config):
+            timeouts.append(config.http_options.timeout)
+            return super().generate_content(model, contents, config)
+
+    monkeypatch.setenv('GEMINI_API_KEY', 'test-key')
+    monkeypatch.setattr(chat_route, '_client', Recording([_turn(text='ok')]))
+
+    login(USER).post('/api/chat', json={'question': 'hi'}, base_url=BASE)
+
+    assert len(timeouts) == 1 and 0 < timeouts[0] <= 12_000
